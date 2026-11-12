@@ -1,0 +1,165 @@
+"""Input validation shared by the UI and the server-side data layer.
+
+Every function returns a cleaned value or raises ValidationError with a message that is safe to
+show to users. The data layer (src/database/db.py) calls these again before any write, so skipping
+the UI never skips validation.
+"""
+from __future__ import annotations
+
+import base64
+import binascii
+import io
+import re
+import unicodedata
+
+from PIL import Image, ImageOps, UnidentifiedImageError
+
+
+class ValidationError(ValueError):
+    """User-correctable input problem (message is safe to display)."""
+
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_PIXELS = 40_000_000
+MAX_IMAGE_SIDE = 2000
+MAX_AUDIO_BYTES = 25 * 1024 * 1024
+MAX_AUDIO_SECONDS = 600
+# Common raster formats that Pillow can decode reliably in this app. Keep this
+# list aligned with the uploader's accepted extensions below.
+ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP", "BMP", "TIFF", "GIF", "ICO", "AVIF", "JPEG2000", "PPM", "TGA"}
+ALLOWED_IMAGE_EXTENSIONS = sorted(
+    extension.lstrip(".").lower()
+    for extension, image_format in Image.registered_extensions().items()
+    if image_format in ALLOWED_IMAGE_FORMATS
+)
+
+_NAME_ALLOWED = re.compile(r"^[^\W\d_](?:[^\W\d_]|[ .'\u2019-])*$", re.UNICODE)
+_CODE_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]{1,19}$")
+_USERNAME_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
+
+
+def _no_controls(text: str, label: str) -> None:
+    if any(unicodedata.category(c).startswith("C") for c in text):
+        raise ValidationError(f"{label} contains invalid characters.")
+
+
+def clean_person_name(name, label: str = "Name") -> str:
+    text = " ".join(str(name or "").split())
+    if len(text) < 2:
+        raise ValidationError(f"{label} must be at least 2 characters.")
+    if len(text) > 60:
+        raise ValidationError(f"{label} must be at most 60 characters.")
+    _no_controls(text, label)
+    if not _NAME_ALLOWED.match(text):
+        raise ValidationError(f"{label} may contain letters, spaces, apostrophes, hyphens and dots only.")
+    return text
+
+
+def clean_username(username) -> str:
+    text = str(username or "").strip().lower()
+    if not _USERNAME_RE.fullmatch(text):
+        raise ValidationError("Username must be 3-32 characters using letters, numbers, dot, dash or underscore.")
+    if not any(c.isalpha() for c in text) or not any(c.isdigit() for c in text):
+        raise ValidationError("Username must include at least one letter and one number.")
+    return text
+
+
+def clean_login_username(username) -> str:
+    """Validate username syntax at login while allowing legacy all-letter usernames."""
+    text = str(username or "").strip().lower()
+    if not _USERNAME_RE.fullmatch(text):
+        raise ValidationError("Username must be 3-32 characters using letters, numbers, dot, dash or underscore.")
+    return text
+
+
+def clean_subject_fields(code, name, section) -> tuple[str, str, str]:
+    code = re.sub(r"\s+", "", str(code or "")).upper()
+    if not _CODE_RE.match(code):
+        raise ValidationError("Subject code must be 2-20 characters: letters, numbers, dash or underscore.")
+    name = " ".join(str(name or "").split())
+    section = " ".join(str(section or "").split())
+    if not (2 <= len(name) <= 100):
+        raise ValidationError("Subject name must be 2-100 characters.")
+    if not (1 <= len(section) <= 20):
+        raise ValidationError("Section must be 1-20 characters.")
+    for label, v in (("Subject name", name), ("Section", section)):
+        _no_controls(v, label)
+        if re.search(r"[<>]", v):
+            raise ValidationError(f"{label} may not contain < or >.")
+    return code, name, section
+
+
+def clean_reason(reason, minimum: int = 3, maximum: int = 500) -> str:
+    text = " ".join(str(reason or "").split())
+    if len(text) < minimum:
+        raise ValidationError("Please give a reason for the correction.")
+    if len(text) > maximum:
+        raise ValidationError(f"The reason is too long (max {maximum} characters).")
+    _no_controls(text, "Reason")
+    return text
+
+
+def check_image_bytes(raw: bytes, max_bytes: int = MAX_IMAGE_BYTES) -> Image.Image:
+    """Validate image content and return an upright, normalized RGB copy."""
+    if not raw:
+        raise ValidationError("The image file is empty.")
+    if len(raw) > max_bytes:
+        raise ValidationError(f"The image is larger than {max_bytes // (1024 * 1024)} MB.")
+    try:
+        probe = Image.open(io.BytesIO(raw))
+        fmt = probe.format
+        w, h = probe.size
+        if fmt not in ALLOWED_IMAGE_FORMATS:
+            raise ValidationError("This image format is not supported. Use a common raster image such as JPEG, PNG, WebP, BMP, TIFF or GIF.")
+        if w * h > MAX_IMAGE_PIXELS:
+            raise ValidationError("The image resolution is too large.")
+        probe.verify()
+        img = Image.open(io.BytesIO(raw))
+        # Multi-frame files use their first frame for a single attendance image.
+        if getattr(img, "is_animated", False):
+            img.seek(0)
+        if max(img.size) > MAX_IMAGE_SIDE:
+            # Pillow can decode some formats directly at thumbnail scale, reducing
+            # peak memory for large phone photos before RGB conversion.
+            resampling = getattr(Image, "Resampling", Image)
+            img.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE), resampling.LANCZOS)
+        img = ImageOps.exif_transpose(img)
+        img.load()
+        # Composite transparency on white before converting to RGB so transparent
+        # PNG/WebP pixels do not become black and obscure the face.
+        if "A" in img.getbands():
+            rgba = img.convert("RGBA")
+            background = Image.new("RGBA", rgba.size, "white")
+            background.alpha_composite(rgba)
+            img = background.convert("RGB")
+        else:
+            img = img.convert("RGB")
+        # Keep classroom photos small in Streamlit session state. The face pipeline
+        # already analyzed at this same maximum size, so this avoids redundant memory use.
+        return img.copy()
+    except ValidationError:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError, SyntaxError):
+        raise ValidationError("That file is not a valid image.") from None
+
+
+def check_audio_bytes(raw: bytes, max_bytes: int = MAX_AUDIO_BYTES) -> bytes:
+    if not raw:
+        raise ValidationError("The audio recording is empty.")
+    if len(raw) > max_bytes:
+        raise ValidationError(f"The recording is larger than {max_bytes // (1024 * 1024)} MB.")
+    return raw
+
+
+def decode_audio_base64(encoded: str, max_bytes: int = MAX_AUDIO_BYTES) -> bytes:
+    """Bound custom-component payload size before base64 allocates decoded audio."""
+    if not isinstance(encoded, str) or not encoded:
+        raise ValidationError("The audio recording is empty.")
+    max_encoded = 4 * ((max_bytes + 2) // 3)
+    if len(encoded) > max_encoded:
+        raise ValidationError(f"The recording is larger than {max_bytes // (1024 * 1024)} MB.")
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise ValidationError("The recording could not be transferred. Please record again.") from None
+    return check_audio_bytes(decoded, max_bytes)
