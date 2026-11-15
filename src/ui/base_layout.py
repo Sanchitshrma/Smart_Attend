@@ -94,8 +94,8 @@ input[type="checkbox"] {{ accent-color:var(--sa-primary); }}
 .sa-user .sa-uname {{ overflow:hidden; text-overflow:ellipsis; }}
 
 /* Section navigation: one scrollable row instead of wrapping */
-.st-key-teacher_tab div[data-testid="stButtonGroup"] div:has(> button[data-variant="segmented_control"]) {{ flex-wrap:nowrap !important; overflow-x:auto; scrollbar-width:none; }}
-.st-key-teacher_tab button[data-variant="segmented_control"] {{ flex:0 0 auto; white-space:nowrap; }}
+.st-key-teacher_tab div[data-testid="stButtonGroup"] div:has(> button[data-variant="segmented_control"]) {{ flex-wrap:nowrap !important; gap:.6rem !important; padding:.25rem .15rem; overflow-x:auto; scrollbar-width:none; }}
+.st-key-teacher_tab button[data-variant="segmented_control"] {{ flex:0 0 auto; white-space:nowrap; margin:0 !important; padding:.5rem 1.15rem; border-radius:10px !important; border:1px solid var(--sa-border); }}
 
 /* Attendance review rows: name + evidence on the left, the Present checkbox on the right */
 .st-key-attendance_review_grid {{ border:1px solid var(--sa-border); border-radius:14px; background:#fff; padding:.15rem .75rem; }}
