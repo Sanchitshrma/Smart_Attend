@@ -9,7 +9,8 @@ from src.components.dialog_add_photo import add_photos_dialog
 from src.components.dialog_attendance_results import attendance_result_dialog
 from src.components.dialog_create_subject import create_subject_dialog
 from src.components.dialog_share_subject import share_subject_dialog
-from src.components.dialog_voice_attendance import voice_attendance_dialog
+from src.components.dialog_add_video import add_video_dialog
+from src.components.camera_capture import attendance_camera
 from src.components.footer import footer_dashboard
 from src.components.header import header_dashboard
 from src.components.subject_card import subject_card
@@ -23,6 +24,7 @@ from src.services.attendance import (
     attendance_trend,
     build_review_session,
     students_at_risk,
+    learnable_samples,
     merge_photo_results,
     new_session_timestamp,
     parse_ts,
@@ -31,7 +33,7 @@ from src.services.attendance import (
     subject_rates,
     teacher_overview,
 )
-from src.ui.base_layout import empty_state, page_header, show_flash, style_base_layout
+from src.ui.base_layout import empty_state, page_header, show_flash, style_base_layout, user_badge
 
 log = logging.getLogger("smartattend.teacher")
 TABS = ["Overview", "Take attendance", "Subjects", "Marks", "Records"]
@@ -54,8 +56,8 @@ def teacher_dashboard():
     right = header_dashboard()
     with right:
         c1, c2 = st.columns([3, 1], vertical_alignment="center")
-        c1.markdown(f"**{teacher['name']}**")
-        if c2.button("Log out", key="teacher_logout"):
+        c1.markdown(user_badge(teacher["name"]), unsafe_allow_html=True)
+        if c2.button("Log out", key="teacher_logout", icon=":material/logout:"):
             st.session_state.pop("teacher_data", None)
             st.session_state.is_logged_in = False
             st.session_state.user_role = None
@@ -91,9 +93,10 @@ def tab_overview():
     detail = _load_detail(teacher_id)
     o = teacher_overview(subjects, detail)
 
-    c1, c2, c3, c4 = st.columns(4)
+    with st.container(key="sa_metrics_overview"):
+        c1, c2, c3, c4 = st.columns(4)
     c1.metric("Subjects", o["subjects"])
-    c2.metric("Enrolled students", o["students"])
+    c2.metric("Enrolments", o["students"], help="Students enrolled, counted once in each of your subjects.")
     c3.metric("Sessions taken", o["sessions"])
     c4.metric("Overall attendance", "–" if o["rate"] is None else f"{o['rate']}%")
     st.write("")
@@ -124,43 +127,105 @@ def tab_overview():
 
 
 # ------------------------------------------------------------ take attendance
+LIVE_SECONDS = 8
+LIVE_FPS = 3
+CAPTURE_MODES = {"live": ":material/videocam: Live camera", "video": ":material/upload: Upload video",
+                 "photos": ":material/photo_camera: Photos"}
+
+
+def _clear_capture() -> None:
+    st.session_state.attendance_images, st.session_state.attendance_video = [], None
+    st.session_state.attendance_live = None
+    st.session_state.live_round = st.session_state.get("live_round", 0) + 1   # fresh camera widget
+
+
+def _live_capture_input() -> None:
+    """Live camera: the browser sends a few JPEG frames per second; no video file is created."""
+    rnd = st.session_state.setdefault("live_round", 0)
+    cap = attendance_camera(key=f"live_cam_{rnd}", seconds=LIVE_SECONDS, fps=LIVE_FPS)
+    if not (isinstance(cap, dict) and cap.get("submitted") and cap.get("mode") == "attendance"):
+        return
+    if cap.get("request_id") == st.session_state.get("live_request"):
+        return
+    st.session_state.live_request = cap.get("request_id")
+    frames = [f for f in (cap.get("frames") or []) if isinstance(f, str)]
+    if not frames:
+        st.error("No frames were received from the camera. Allow camera access and try again.")
+        return
+    st.session_state.attendance_live = {"frames": frames, "times": cap.get("times") or []}
+
+
+def _frame_bytes(b64: str) -> bytes | None:
+    import base64
+    try:
+        return base64.b64decode(b64.split(",", 1)[1] if b64.startswith("data:") else b64)
+    except (ValueError, TypeError):
+        return None
+
+
 def tab_take_attendance():
     teacher_id = st.session_state.teacher_data["teacher_id"]
-    page_header("Take attendance", "Choose a subject, add classroom photos (or record audio), then review the result.")
+    page_header("Take attendance", "Pick a subject, capture the class with the live camera, then review the result.")
     st.session_state.setdefault("attendance_images", [])
-    images = st.session_state.attendance_images
+    st.session_state.setdefault("attendance_video", None)
+    st.session_state.setdefault("attendance_live", None)
 
     subjects = db.get_teacher_subjects(teacher_id)
     if not subjects:
         empty_state("You have not created a subject yet. Open <b>Subjects</b> to create one.")
         return
     by_id = {s["subject_id"]: s for s in subjects}
-
-    c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
-    with c1:
-        subject_id = st.selectbox(
-            "Subject", list(by_id), format_func=lambda i: f"{by_id[i]['name']} · {by_id[i]['subject_code']} (Sec {by_id[i]['section']})"
-        )
-    with c2:
-        if st.button("Add photos", type="primary", icon=":material/photo_camera:", width="stretch"):
+    subject_id = st.selectbox(
+        "Subject", list(by_id), format_func=lambda i: f"{by_id[i]['name']} · {by_id[i]['subject_code']} (Sec {by_id[i]['section']})"
+    )
+    mode = st.segmented_control("Capture with", list(CAPTURE_MODES), format_func=CAPTURE_MODES.get,
+                                default="live", key="capture_mode") or "live"
+    if mode == "live":
+        st.caption(f"Stand at the front and pan slowly across the room for {LIVE_SECONDS} seconds. "
+                   "Only still frames are analysed in memory; no video is recorded or saved.")
+        _live_capture_input()
+    elif mode == "video":
+        st.caption("Already recorded a short clip on your phone? Upload it here (it is never stored).")
+        if st.button("Choose a video", icon=":material/upload:", width="stretch"):
+            add_video_dialog()
+    else:
+        st.caption("Classroom photos work too. Add several angles for a large class.")
+        if st.button("Add photos", icon=":material/photo_camera:", width="stretch"):
             add_photos_dialog()
 
+    images, video, live = st.session_state.attendance_images, st.session_state.attendance_video, st.session_state.attendance_live
+    ready = []
+    if live:
+        ready.append(f"live capture ({len(live['frames'])} frames)")
+    if video:
+        ready.append(f"video “{escape(video['name'])}”")
     if images:
-        st.caption(f"{len(images)} photo(s) ready")
-        cols = st.columns(4)
-        for i, img in enumerate(images):
-            cols[i % 4].image(img, width="stretch", caption=f"Photo {i + 1}")
+        ready.append(f"{len(images)} photo(s)")
+    if ready:
+        with st.container(border=True, key="capture_ready"):
+            st.markdown("**Ready to analyse:** " + ", ".join(ready))
+            if live:
+                picks = live["frames"][:: max(1, len(live["frames"]) // 4)][:4]
+                cols = st.columns(4)
+                for i, b64 in enumerate(picks):
+                    data = _frame_bytes(b64)
+                    if data:
+                        cols[i].image(data, width="stretch")
+            if video:
+                st.video(video["bytes"])
+            if images:
+                cols = st.columns(4)
+                for i, img in enumerate(images):
+                    cols[i % 4].image(img, width="stretch", caption=f"Photo {i + 1}")
 
-    b1, b2, b3 = st.columns(3)
+    has_input = bool(images or video or live)
+    b1, b2 = st.columns(2)
     with b1:
-        if st.button("Clear photos", width="stretch", icon=":material/delete:", disabled=not images):
-            st.session_state.attendance_images = []
+        if st.button("Clear", width="stretch", icon=":material/delete:", disabled=not has_input):
+            _clear_capture()
             st.rerun()
     with b2:
-        run = st.button("Run face analysis", width="stretch", type="primary", icon=":material/analytics:", disabled=not images)
-    with b3:
-        if st.button("Use voice attendance", width="stretch", icon=":material/mic:"):
-            voice_attendance_dialog(subject_id)
+        run = st.button("Run face analysis", width="stretch", type="primary", icon=":material/analytics:", disabled=not has_input)
 
     if not run:
         return
@@ -170,32 +235,69 @@ def tab_take_attendance():
         return
 
     allowed = {int(s["student_id"]) for s in enrolled}
+    results, labels, headcount, video_note = [], [], None, ""
     try:
-        results = []
-        with st.spinner("Scanning classroom photos…"):
-            for img in images:
-                results.append(analyze_photo(img, allowed_ids=allowed))
+        if live:
+            from src.pipelines.video_pipeline import VideoError, analyze_frames, decode_live_frames
+            bar = st.progress(0.0, text="Checking the live frames…")
+            try:
+                frames, seconds = decode_live_frames(live["frames"], live.get("times"))
+                lres = analyze_frames(frames, seconds or LIVE_SECONDS, allowed_ids=allowed,
+                                      progress=lambda f: bar.progress(f, text="Checking the live frames…"))
+            except VideoError as exc:
+                bar.empty()
+                st.error(str(exc))
+                return
+            bar.empty()
+            results.append(lres.photo)
+            labels.append("Live camera")
+            headcount = lres.headcount
+            video_note = f"Live camera: {lres.frames_analysed} frames, about {lres.headcount} people seen · "
+        if video:
+            from src.pipelines.video_pipeline import VideoError, analyze_video
+            bar = st.progress(0.0, text="Scanning the video frame by frame…")
+            try:
+                vres = analyze_video(video["bytes"], allowed_ids=allowed, progress=lambda f: bar.progress(f, text="Scanning the video frame by frame…"))
+            except VideoError as exc:
+                bar.empty()
+                st.error(str(exc))
+                return
+            bar.empty()
+            results.append(vres.photo)
+            labels.append("Video")
+            headcount = max(headcount or 0, vres.headcount)
+            video_note += f"Video: {vres.frames_analysed} frames over {vres.seconds:.0f} s, about {headcount} people seen · "
+        if images:
+            with st.spinner("Scanning classroom photos…"):
+                for k, img in enumerate(images, start=1):
+                    results.append(analyze_photo(img, allowed_ids=allowed))
+                    labels.append(f"Photo {k}")
     except DatabaseError as exc:
         st.error(str(exc))
         return
     except Exception:  # noqa: BLE001
         log.exception("Face analysis failed")
-        st.error("Face analysis failed. Check that the photos are valid images and try again.")
+        st.error("Face analysis failed. Check that the video or photos are valid and try again.")
         return
 
-    present, scores, notes, t = merge_photo_results(results, allowed)
+    present, scores, notes, t = merge_photo_results(results, allowed, labels)
     if t["faces"] == 0:
-        st.warning("No faces were detected in the photos. Try a clearer, closer or better-lit photo.")
+        st.warning("No faces were detected. Try a closer, steadier or better-lit video or photo.")
         return
-    summary = (
-        f"{t['faces']} face(s) detected · {t['matched']} identified · {t['ambiguous'] + t['duplicate']} need review · "
+    summary = video_note + (
+        f"{t['faces']} face(s)/people · {len(present)} identified · {t['ambiguous'] + t['duplicate']} need review · "
         f"{t['unknown']} not recognised" + (f" · {t['small']} very small" if t["small"] else "")
     )
-    st.caption(summary)
     if t["unknown"]:
-        st.info("Faces that were not recognised are not assigned to anyone. If a student was missed, tick them as present in the review table.")
+        st.info("Faces that were not recognised are not assigned to anyone. Use the voice check or tick students manually.")
     df, logs = build_review_session(enrolled, present, subject_id, new_session_timestamp(), scores=scores, review_notes=notes)
-    attendance_result_dialog(df, logs, summary)
+    st.session_state.review = {
+        "df": df, "logs": logs, "summary": summary, "headcount": headcount,
+        "learn": learnable_samples(results),
+        "names": {int(s["student_id"]): s["name"] for s in enrolled},
+        "has_voice": {int(s["student_id"]): bool(s.get("voice_embedding")) for s in enrolled},
+    }
+    attendance_result_dialog()
 
 
 # --------------------------------------------------------------------- subjects
@@ -233,7 +335,7 @@ def tab_subjects():
                 if save_subject:
                     try:
                         db.update_subject(teacher_id, sub["subject_id"], edited_code, edited_name, edited_section)
-                        st.success("Subject updated.")
+                        st.session_state.flash = "Subject updated."
                         st.rerun()
                     except DatabaseError as exc:
                         st.error(str(exc))
@@ -342,14 +444,19 @@ def _corrections_panel(teacher_id, view):
         if rows.empty:
             st.info("Only deleted or unenrolled students are in this session; their history is read-only.")
             return
-        sid_by_name = {r["Student"]: r for _, r in rows.iterrows()}
-        who = st.selectbox("Student", list(sid_by_name), key="corr_student")
-        current = bool(sid_by_name[who]["Present"])
+        # Keyed by student id: two students can share a name.
+        by_id = {int(r["student_id"]): r for _, r in rows.iterrows()}
+        dup = rows["Student"].duplicated(keep=False).tolist()
+        labels_s = {int(r["student_id"]): (f"{r['Student']} (#{int(r['student_id'])})" if d else str(r["Student"]))
+                    for (_, r), d in zip(rows.iterrows(), dup)}
+        pick = st.selectbox("Student", list(by_id), format_func=labels_s.get, key="corr_student")
+        who = labels_s[pick]
+        current = bool(by_id[pick]["Present"])
         new = st.radio("Mark as", ["Present", "Absent"], index=0 if current else 1, horizontal=True, key="corr_new")
         reason = st.text_input("Reason (required)", max_chars=200, key="corr_reason")
         if st.button("Save correction", key="corr_save"):
-            subject_id = sid_by_name[who]["subject_id"]
-            student_id = sid_by_name[who]["student_id"]
+            subject_id = by_id[pick]["subject_id"]
+            student_id = pick
             try:
                 changed = db.correct_attendance(teacher_id, int(subject_id), ts, int(student_id), new == "Present", reason)
             except DatabaseError as exc:

@@ -21,7 +21,18 @@ def parse_ts(ts: Optional[str]) -> Optional[datetime]:
         return None
     if parsed.tzinfo is None:  # legacy rows were stored as naive local time
         return parsed
-    return parsed.astimezone()
+    return parsed.astimezone(display_timezone())
+
+
+def display_timezone():
+    """The school's time zone (APP_TIMEZONE); servers usually run in UTC, so never use the server's."""
+    from datetime import timedelta
+    from src.settings import APP_TIMEZONE
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(APP_TIMEZONE)
+    except Exception:  # noqa: BLE001 - unknown name or no tz database: fall back to India time
+        return timezone(timedelta(hours=5, minutes=30), "IST")
 
 
 def build_session(
@@ -123,7 +134,7 @@ def teacher_overview(subjects: list[Mapping], detail: pd.DataFrame) -> dict:
     present = int(detail["Present"].sum()) if not detail.empty else 0
     return {
         "subjects": len(subjects),
-        "students": sum(int(s.get("total_students", 0)) for s in subjects),
+        "students": sum(int(s.get("total_students", 0)) for s in subjects),  # enrolments (per subject)
         "sessions": sessions,
         "rate": attendance_rate(present, len(detail)),
     }
@@ -185,53 +196,57 @@ def apply_review_edits(logs: list[dict], edited: pd.DataFrame) -> list[dict]:
     return out
 
 
-def merge_photo_results(results, ids_in_class: set[int]) -> tuple[dict[int, str], dict[int, float], dict[int, str], dict[str, int]]:
-    """Combine per-photo FaceMatch results into (present, scores, review_notes, totals)."""
+def merge_photo_results(results, ids_in_class: set[int], labels: list[str] | None = None) -> tuple[dict[int, str], dict[int, float], dict[int, str], dict[str, int]]:
+    """Combine per-photo (or per-video) FaceMatch results into (present, scores, review_notes, totals).
+
+    `labels` names each result in the evidence column, e.g. ["Video", "Photo 1"]."""
     present: dict[int, str] = {}
     scores: dict[int, float] = {}
     notes: dict[int, list[str]] = {}
     totals = {"faces": 0, "matched": 0, "ambiguous": 0, "duplicate": 0, "unknown": 0, "small": 0}
     for p_idx, res in enumerate(results, start=1):
+        source = labels[p_idx - 1] if labels else f"Photo {p_idx}"
+        is_video = source.startswith("Video")
         for f in res.faces:
             totals["faces"] += 1
             totals[f.status] += 1
             totals["small"] += "small_face" in f.flags
             if f.status == "matched" and f.student_id not in present:
-                present[f.student_id] = f"Photo {p_idx}"
+                present[f.student_id] = f"{source} ({f.sightings} frames)" if is_video else source
                 scores[f.student_id] = f.distance
             elif f.status in ("ambiguous", "duplicate"):
                 label = "ambiguous match" if f.status == "ambiguous" else "face claimed twice"
                 if "other_class_closer" in f.flags:
                     label = "may be a student from another class"
+                if "seen_once" in f.flags:
+                    label = "seen in only one frame"
+                where = f"{source}, person {f.index + 1}" if is_video else f"{source}, face {f.index + 1}"
                 for sid in f.candidates:
                     if sid in ids_in_class:
-                        notes.setdefault(sid, []).append(f"Photo {p_idx}, face {f.index + 1}: {label}")
+                        notes.setdefault(sid, []).append(f"{where}: {label}")
+    for sid in present:  # a confident match anywhere settles it
+        notes.pop(sid, None)
     return present, scores, {k: "; ".join(v) for k, v in notes.items()}, totals
 
 
-def voice_review_inputs(enrolled: Iterable[Mapping], result) -> tuple[dict[int, str], dict[int, float], dict[int, str]]:
-    """Turn a BulkVoiceResult into (present, scores, review_notes) for build_review_session.
+def learnable_samples(results) -> list[dict]:
+    """Candidate face samples for learning over time: confident, full-size matches (best per student).
+    They are stored only after the teacher saves the session and keeps that student present."""
+    best: dict[int, tuple[float, list[float]]] = {}
+    for res in results:
+        for f in res.faces:
+            if f.status != "matched" or f.embedding is None or "small_face" in f.flags:
+                continue
+            if f.student_id not in best or f.distance < best[f.student_id][0]:
+                best[f.student_id] = (f.distance, [float(x) for x in f.embedding])
+    return [{"student_id": sid, "embedding": emb} for sid, (_, emb) in best.items()]
 
-    Only confident matches are ticked present. Ambiguous candidates get a review note but stay
-    unticked (the same rule as faces), so pressing "Confirm & save" without reading the table can
-    never mark a student present on a guess.
-    """
-    scores = {int(sid): float(score) for sid, score in result.matched.items()}
-    present = {sid: f"Voice {score:.2f}" for sid, score in scores.items()}
-    matched = set(scores)
-    ambiguous = {int(sid) for group in result.ambiguous for sid in group} - matched
-    other_class = {int(sid) for sid in getattr(result, "other_class", [])}
-    notes: dict[int, str] = {}
-    for student in enrolled:
-        sid = int(student["student_id"])
-        if not student.get("voice_embedding"):
-            notes[sid] = "No voice profile: mark manually if present"
-        elif sid in ambiguous:
-            notes[sid] = ("Possible match, but a student from another class sounds as close; verify"
-                          if sid in other_class else "Possible voice match; please verify")
-        elif sid not in matched:
-            notes[sid] = "Not identified; verify attendance"
-    return present, scores, notes
+
+def confirmed_learning_samples(samples: list[dict], final_logs: list[dict]) -> list[dict]:
+    """Keep only samples whose student the teacher left marked present by the automatic face match."""
+    kept = {l["student_id"] for l in final_logs
+            if l.get("is_present") and l.get("source", SOURCE_AUTO) == SOURCE_AUTO and l.get("method", "face") == "face"}
+    return [s for s in samples if s["student_id"] in kept]
 
 
 # ------------------------------------------------------------------ analytics

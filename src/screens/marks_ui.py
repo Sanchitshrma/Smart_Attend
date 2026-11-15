@@ -77,7 +77,8 @@ def _import_csv(teacher_id, aid, a, enrolled):
     if preview.fatal:
         st.error(preview.fatal)
         return
-    c1, c2, c3 = st.columns(3)
+    with st.container(key="sa_metrics_marks"):
+        c1, c2, c3 = st.columns(3)
     c1.metric("Valid rows", len(preview.rows))
     c2.metric("Rows with errors", len(preview.errors))
     c3.metric("Students without marks", len(preview.missing))

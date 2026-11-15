@@ -7,7 +7,7 @@ import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 import bcrypt
 import streamlit as st
@@ -195,6 +195,26 @@ def record_attempt(kind: str, key: str, success: bool, now: datetime | None = No
             _run(_t("auth_attempts").delete().eq("kind", kind).eq("key", key).eq("success", False), "reset attempts")
     except DatabaseError:
         log.warning("could not record auth attempt (apply migration 004)")
+
+
+def _face_keys(session_key: str, network_key: str | None) -> list[tuple[str, int, int]]:
+    h = lambda v: hashlib.sha256(str(v).encode()).hexdigest()[:32]  # noqa: E731 - never store raw addresses
+    keys = [("s:" + h(session_key), cfg.STUDENT_FACE_MAX_FAILURES, cfg.STUDENT_FACE_MAX_ATTEMPTS)]
+    if network_key:  # a whole class can share one network address, so this limit is much higher
+        keys.append(("n:" + h(network_key), cfg.STUDENT_FACE_MAX_FAILURES * 8, cfg.STUDENT_FACE_MAX_ATTEMPTS * 10))
+    return keys
+
+
+def check_student_face_attempt(session_key: str, network_key: str | None = None) -> None:
+    """Rate limit public face sign-in checks per browser session and (more loosely) per network."""
+    for key, max_fail, max_all in _face_keys(session_key, network_key):
+        check_throttle("student_face", key, max_fail, cfg.STUDENT_FACE_WINDOW_MINUTES)
+        check_throttle("student_face", key, max_all, cfg.STUDENT_FACE_WINDOW_MINUTES, count_success=None)
+
+
+def record_student_face_attempt(session_key: str, network_key: str | None, ok: bool) -> None:
+    for key, _, _ in _face_keys(session_key, network_key):
+        record_attempt("student_face", key, ok)
 
 
 # --------------------------------------------------------------------- authorisation
@@ -423,15 +443,90 @@ def set_teacher_status(admin_id: int, teacher_id: int, status: str) -> None:
 
 # ---------------------------------------------------------------------- students
 def get_face_gallery() -> list[dict]:
-    """Minimal rows needed for face matching (no voice data, no extra columns)."""
+    """Minimal rows needed for face matching (no voice data, no extra columns).
+
+    Each student contributes their registration face plus any learned templates (migration 010),
+    so a student can appear on several rows; matching uses the closest one.
+    """
     rows = _run(_t("students").select("student_id, face_embedding"), "load enrolled faces")
-    return [r for r in rows if r.get("face_embedding")]
+    rows = [r for r in rows if r.get("face_embedding")]
+    for t in _learned_templates():
+        rows.append({"student_id": t["student_id"], "face_embedding": t["embedding"]})
+    return rows
+
+
+_TEMPLATES_AVAILABLE: bool | None = None
+
+
+def _is_missing_table(exc: Exception) -> bool:
+    return getattr(exc, "code", None) in ("PGRST205", "42P01") or "Could not find the table" in str(exc)
+
+
+def _learned_templates(student_id: int | None = None) -> list[dict]:
+    """Learned face templates, oldest first; [] when migration 010 has not been applied."""
+    global _TEMPLATES_AVAILABLE
+    if _TEMPLATES_AVAILABLE is False:
+        return []
+    q = _t("face_templates").select("template_id, student_id, embedding")
+    if student_id is not None:
+        q = q.eq("student_id", int(student_id))
+    try:
+        rows = _run(q, "load learned face templates")
+    except DatabaseError as exc:
+        if exc.__cause__ is not None and _is_missing_table(exc.__cause__):
+            log.warning("face_templates table missing (migration 010 not applied); learning over time is off")
+            _TEMPLATES_AVAILABLE = False
+            return []
+        raise
+    _TEMPLATES_AVAILABLE = True
+    return sorted(rows, key=lambda r: r["template_id"])
+
+
+def add_face_templates(teacher_id: int, subject_id: int, samples: Iterable[Mapping]) -> int:
+    """Learning over time: store teacher-confirmed face samples as extra templates.
+
+    Called only after the teacher saved a session. Each sample is {"student_id", "embedding"} for a
+    face that was matched automatically and kept present by the teacher. Server-side rules
+    (biometrics.plan_template_update): the student must be enrolled in the teacher's subject, the
+    sample must stay close to the registration face, must add new information, and at most
+    FACE_MAX_TEMPLATES learned templates are kept per student. Returns how many were added.
+    """
+    if not cfg.FACE_LEARNING:
+        return 0
+    assert_teacher_owns_subject(teacher_id, subject_id)
+    enrolled = {s["student_id"]: s for s in _enrolled_students(subject_id)}
+    added = 0
+    for sample in samples:
+        sid = sample.get("student_id")
+        if sid not in enrolled or not biometrics.is_valid_embedding(sample.get("embedding"), biometrics.FACE_DIM):
+            continue
+        row = _run(_t("students").select("student_id, face_embedding").eq("student_id", int(sid)), "load the registration face")
+        enrol = row[0].get("face_embedding") if row else None
+        if not biometrics.is_valid_embedding(enrol, biometrics.FACE_DIM):
+            continue
+        learned = _learned_templates(sid)
+        if _TEMPLATES_AVAILABLE is False:
+            return 0
+        add, drop, _reason = biometrics.plan_template_update(
+            sample["embedding"], enrol, [(t["template_id"], t["embedding"]) for t in learned],
+            min_novelty=cfg.FACE_LEARN_MIN_NOVELTY, max_from_enrolment=cfg.FACE_LEARN_MAX_FROM_ENROLMENT,
+            cap=cfg.FACE_MAX_TEMPLATES,
+        )
+        if not add:
+            continue
+        emb = biometrics.clean_embedding(sample["embedding"], biometrics.FACE_DIM, "Face")
+        _run(_t("face_templates").insert({"student_id": int(sid), "embedding": emb, "subject_id": int(subject_id),
+                                          "added_by": int(teacher_id)}), "save a learned face template")
+        for tid in drop:
+            _run(_t("face_templates").delete().eq("template_id", tid), "remove the oldest learned template")
+        added += 1
+    return added
 
 
 def get_voice_gallery() -> list[dict]:
-    """Voice profiles of all students (id + embedding only), used to normalise voice scores and to
-    notice when a student from another class sounds closer than anyone enrolled."""
-    rows = _run(_t("students").select("student_id, voice_embedding"), "load voice profiles")
+    """Voice profiles of all students (id, name, embedding), used to normalise voice scores and to
+    name a student from another class whose voice answers for someone else."""
+    rows = _run(_t("students").select("student_id, name, voice_embedding"), "load voice profiles")
     return [r for r in rows if r.get("voice_embedding")]
 
 
@@ -459,6 +554,9 @@ def get_gallery_version() -> str:
     if rows is None:
         rows = _run(_t("students").select("student_id"), "check enrolment version")
     payload = "|".join(f"{r['student_id']}:{r.get('biometric_updated_at') or ''}" for r in sorted(rows, key=lambda r: r["student_id"]))
+    if _TEMPLATES_AVAILABLE is not False:  # learned templates change the gallery too
+        ids = [t["template_id"] for t in _learned_templates()]
+        payload += f"|t{len(ids)}:{max(ids, default=0)}"
     return hashlib.sha1(payload.encode()).hexdigest()[:12]
 
 
@@ -495,6 +593,8 @@ def update_student_face_embedding(student_id: int, face_embedding) -> None:
     )
     if not rows:
         raise DatabaseError("That student profile no longer exists.")
+    if _learned_templates(student_id):  # a new registration face starts learning afresh
+        _run(_t("face_templates").delete().eq("student_id", int(student_id)), "reset learned face templates")
 
 
 def delete_student_profile(student_id: int) -> None:

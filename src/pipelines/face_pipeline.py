@@ -42,6 +42,8 @@ class FaceMatch:
     second_distance: float | None = None
     candidates: list[int] = field(default_factory=list)  # students a teacher should consider
     flags: list[str] = field(default_factory=list)       # e.g. small_face, other_class_closer
+    embedding: np.ndarray | None = field(default=None, repr=False)  # kept so a confirmed match can be learned
+    sightings: int = 1                                    # frames this person was seen in (video)
 
     @property
     def margin(self) -> float | None:
@@ -135,8 +137,9 @@ def get_face_embeddings(image) -> list[np.ndarray]:
 
 # ----------------------------------------------------------------------- matching
 def build_gallery(rows: list[dict]) -> tuple[list[int], np.ndarray]:
-    """ids[i] always describes matrix[i]. Malformed stored embeddings are skipped (and logged),
-    never allowed to crash matching for everyone or shift the id<->row mapping."""
+    """ids[i] always describes matrix[i]. A student may appear on several rows (registration face plus
+    learned templates). Malformed stored embeddings are skipped (and logged), never allowed to crash
+    matching for everyone or shift the id<->row mapping."""
     ids, vecs = [], []
     for r in rows:
         emb = r.get("face_embedding")
@@ -171,17 +174,21 @@ def match_encodings(
     if not math.isfinite(margin) or not 0.0 <= margin <= 2.0:
         raise ValueError("Face match margin must be finite and between 0 and 2.")
     result = PhotoResult(num_faces=len(encodings))
-    ids_arr = np.array(ids)
+    row_ids = np.array(ids)
+    ids_arr = np.unique(row_ids) if len(ids) else row_ids   # one entry per student
+    inverse = np.searchsorted(ids_arr, row_ids) if len(ids) else row_ids
     for i, enc in enumerate(encodings):
-        face = FaceMatch(index=i, bbox=None if bboxes is None else bboxes[i])
+        face = FaceMatch(index=i, bbox=None if bboxes is None else bboxes[i], embedding=np.asarray(enc))
         if face.bbox and min(face.bbox[2] - face.bbox[0], face.bbox[3] - face.bbox[1]) < FACE_MIN_SIZE_PX:
             face.flags.append("small_face")
         result.faces.append(face)
         if not len(ids):
             continue
 
-        dists = np.linalg.norm(matrix - enc, axis=1)
-        in_class = np.ones(len(ids), dtype=bool) if allowed_ids is None else np.isin(ids_arr, list(allowed_ids))
+        row_dists = np.linalg.norm(matrix - enc, axis=1)
+        dists = np.full(len(ids_arr), np.inf)
+        np.minimum.at(dists, inverse, row_dists)          # each student's closest template
+        in_class = np.ones(len(ids_arr), dtype=bool) if allowed_ids is None else np.isin(ids_arr, list(allowed_ids))
         if not in_class.any():
             continue
         cand_idx = np.flatnonzero(in_class)
@@ -189,7 +196,7 @@ def match_encodings(
         best = order[0]
         face.distance = float(dists[best])
         face.second_distance = float(dists[order[1]]) if len(order) > 1 else None
-        log.debug("face %d: best=%s d=%.4f second=%s", i, ids[best], face.distance, face.second_distance)
+        log.debug("face %d: best=%s d=%.4f second=%s", i, ids_arr[best], face.distance, face.second_distance)
 
         if face.distance > threshold:
             continue  # unknown
@@ -268,4 +275,9 @@ def confusable_pairs(rows: list[dict], threshold: float = FACE_MATCH_THRESHOLD) 
         return []
     d = np.linalg.norm(mat[:, None, :] - mat[None, :, :], axis=2)
     ii, jj = np.where(np.triu(d <= threshold, k=1))
-    return sorted(((ids[i], ids[j], float(d[i, j])) for i, j in zip(ii, jj)), key=lambda t: t[2])
+    best: dict[tuple[int, int], float] = {}
+    for i, j in zip(ii, jj):
+        if ids[i] != ids[j]:  # templates of the same student are not a conflict
+            key = tuple(sorted((ids[i], ids[j])))
+            best[key] = min(best.get(key, float("inf")), float(d[i, j]))
+    return sorted(((a, b, dist) for (a, b), dist in best.items()), key=lambda t: t[2])

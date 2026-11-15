@@ -19,6 +19,25 @@ def is_valid_embedding(vec, dim: int) -> bool:
         return False
 
 
+def plan_template_update(new, enrolment, learned: Sequence[tuple[int, Sequence[float]]], *,
+                         min_novelty: float, max_from_enrolment: float, cap: int) -> tuple[bool, list[int], str]:
+    """Decide whether a teacher-confirmed face sample should become an extra template.
+
+    `learned`: (template_id, embedding) pairs, oldest first. Returns (add, template_ids_to_delete, reason).
+    Rules: the sample must stay close to the registration face (no drift), must be new enough to
+    add information, and at most `cap` learned templates are kept (the oldest is dropped).
+    """
+    new = np.asarray(new, dtype=np.float64)
+    enrol = np.asarray(enrolment, dtype=np.float64)
+    if np.linalg.norm(new - enrol) > max_from_enrolment:
+        return False, [], "too far from the registration face"
+    stored = [enrol] + [np.asarray(e, dtype=np.float64) for _, e in learned]
+    if min(np.linalg.norm(new - e) for e in stored) < min_novelty:
+        return False, [], "already covered by a stored template"
+    overflow = len(learned) + 1 - cap
+    return True, [tid for tid, _ in learned[:max(overflow, 0)]], "added"
+
+
 def clean_embedding(vec, dim: int, label: str) -> list[float]:
     """Return a plain list of floats or raise ValueError (never store a malformed embedding)."""
     if not is_valid_embedding(vec, dim):
@@ -35,12 +54,13 @@ def find_face_conflicts(embedding: Sequence[float], rows: Iterable[dict], thresh
     Malformed stored rows are skipped (they can never match), never raised on.
     """
     probe = np.asarray(embedding, dtype=np.float64)
-    out = []
+    best: dict[int, float] = {}  # a student may have several templates: keep the closest
     for r in rows:
         emb = r.get("face_embedding")
         if r.get("student_id") == exclude_id or not is_valid_embedding(emb, FACE_DIM):
             continue
         d = float(np.linalg.norm(np.asarray(emb, dtype=np.float64) - probe))
-        if d <= threshold:
-            out.append((int(r["student_id"]), d))
-    return sorted(out, key=lambda t: t[1])
+        sid = int(r["student_id"])
+        if d <= threshold and d < best.get(sid, float("inf")):
+            best[sid] = d
+    return sorted(best.items(), key=lambda t: t[1])

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from html import escape
 
-import streamlit as st
 
 from src.ui.base_layout import html
 

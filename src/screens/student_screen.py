@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import hashlib
 import logging
+import time
 
+import numpy as np
 import streamlit as st
 
 from src.components.dialog_enroll import enroll_dialog
+from src.components.face_check import face_check, reset_face_check
 from src.components.footer import footer_dashboard
 from src.components.header import header_dashboard
 from src.components.subject_card import subject_card
@@ -22,13 +24,14 @@ from src.database.db import (
     update_student_face_embedding,
     unenroll_student_to_subject,
 )
-from src.pipelines.face_pipeline import analyze_photo, clear_gallery_cache, detect_faces
+from src.pipelines.face_pipeline import clear_gallery_cache, current_gallery, match_encodings
+from src.pipelines.liveness import face_size_ok
 from src.pipelines.voice_pipeline import VoiceError, get_voice_embedding
 from src.screens.marks_ui import student_marks_section
 from src.services.attendance import DEFAULT_MIN_ATTENDANCE, attendance_rate, low_attendance_subjects, student_stats
 from src.settings import FACE_MIN_SIZE_PX
-from src.validation import ValidationError, check_audio_bytes, check_image_bytes, decode_audio_base64
-from src.ui.base_layout import empty_state, page_header, show_flash, style_base_layout
+from src.validation import ValidationError, check_audio_bytes, decode_audio_base64
+from src.ui.base_layout import empty_state, page_header, show_flash, style_base_layout, user_badge
 
 log = logging.getLogger("smartattend.student")
 
@@ -61,29 +64,18 @@ def _save_student_voice_profile(student_id: int, capture: dict) -> None:
         st.success("Voice profile saved. You can record a new sample here to replace it.")
 
 
-def _save_student_face_profile(student_id: int, photo) -> None:
+def _save_student_face_profile(student_id: int, res) -> None:
+    """Replace the face template with the one from a passed live face check."""
+    if not face_size_ok(res.bbox, FACE_MIN_SIZE_PX):
+        st.warning(f"Move closer so your face is at least {FACE_MIN_SIZE_PX} pixels wide and tall, then try again.")
+        return
     try:
-        with st.spinner("Updating your face profile…"):
-            normalized = check_image_bytes(photo.getvalue())
-            faces = detect_faces(normalized)
-            if len(faces) != 1:
-                st.warning("Exactly one clear face is needed. Please take another photo.")
-                return
-            bbox, embedding = faces[0]
-            if min(bbox[2] - bbox[0], bbox[3] - bbox[1]) < FACE_MIN_SIZE_PX:
-                st.warning(f"Move closer so your face is at least {FACE_MIN_SIZE_PX} pixels wide and tall.")
-                return
-            update_student_face_embedding(student_id, embedding.tolist())
+        update_student_face_embedding(student_id, res.embedding)
     except (ValidationError, DatabaseError) as exc:
         st.error(str(exc))
-    except ImportError:
-        st.error("Face recognition is not installed on this server.")
-    except Exception:  # noqa: BLE001
-        log.exception("Face profile update failed")
-        st.error("Could not update your face profile. Please try again or ask your teacher for help.")
-    else:
-        clear_gallery_cache()
-        st.success("Face profile updated. Your photo was processed but is not stored.")
+        return
+    clear_gallery_cache()
+    st.success("Face profile updated. Only the face template is stored, never the camera frames.")
 
 
 def student_dashboard():
@@ -91,8 +83,8 @@ def student_dashboard():
     right = header_dashboard()
     with right:
         c1, c2 = st.columns([3, 1], vertical_alignment="center")
-        c1.markdown(f"**{student['name']}**")
-        if c2.button("Log out", key="student_logout"):
+        c1.markdown(user_badge(student["name"]), unsafe_allow_html=True)
+        if c2.button("Log out", key="student_logout", icon=":material/logout:"):
             _logout()
             st.rerun()
     show_flash()
@@ -115,7 +107,8 @@ def student_dashboard():
     stats_map = student_stats(logs)
     total = sum(s["total"] for s in stats_map.values())
     attended = sum(s["attended"] for s in stats_map.values())
-    m1, m2, m3 = st.columns(3)
+    with st.container(key="sa_metrics_student"):
+        m1, m2, m3 = st.columns(3)
     m1.metric("Enrolled subjects", len(subjects))
     m2.metric("Classes recorded", total)
     rate = attendance_rate(attended, total)
@@ -133,13 +126,11 @@ def student_dashboard():
                 _save_student_voice_profile(student["student_id"], voice_sample)
 
     with st.expander("Update face sign-in profile"):
-        st.write("Use this if your appearance has changed or face sign-in has become unreliable. Your photo is processed into a template and is not stored.")
-        face_photo = st.camera_input("Take a new face profile photo", key="student_face_profile_camera")
-        if face_photo:
-            face_digest = hashlib.sha256(face_photo.getvalue()).hexdigest()
-            if st.session_state.get("student_face_profile_request") != face_digest:
-                st.session_state.student_face_profile_request = face_digest
-                _save_student_face_profile(student["student_id"], face_photo)
+        st.write("Use this if your appearance has changed or face sign-in has become unreliable. "
+                 "Do the same blink check as at sign-in; only the face template is stored.")
+        res = face_check("profile_update", label="Start face check")
+        if res is not None:
+            _save_student_face_profile(student["student_id"], res)
 
     if not subjects:
         empty_state("You are not enrolled in any subject yet. Use <b>Enroll in subject</b> and enter the code from your teacher.")
@@ -198,10 +189,10 @@ def student_dashboard():
     footer_dashboard()
 
 
-def _registration_form(photo) -> None:
+def _registration_form(pending: dict) -> None:
     with st.container(border=True):
         st.subheader("Create your profile")
-        st.caption("Your face and voice are converted to numbers for matching. The photo and raw recording are not stored.")
+        st.caption("Your face and voice are converted to numbers for matching. Camera frames and the raw recording are not stored.")
         name = st.text_input("Your name", key="new_student_name", placeholder="e.g. Hamza Rizvi", max_chars=60,
                              help="Use letters, spaces, apostrophes, hyphens or dots; numbers are not allowed.")
         st.markdown("**Voice sample required** for voice attendance. Read this prompt naturally while alone for at least 5 seconds:")
@@ -230,21 +221,16 @@ def _registration_form(photo) -> None:
             except ValidationError as exc:
                 st.error(str(exc))
                 return
+            if time.time() - pending["at"] > REGISTRATION_WINDOW_SECONDS:
+                st.session_state.pop("pending_face", None)
+                st.warning("The face check is too old. Please do the face check again.")
+                return
             with st.spinner("Creating your profile…"):
                 try:
                     reserve_student_registration()
-                    normalized_photo = check_image_bytes(photo.getvalue())
-                    faces = detect_faces(normalized_photo)
-                    if len(faces) != 1:
-                        st.error("Exactly one clear face is needed to register. Please retake the photo.")
-                        return
-                    bbox, face_embedding = faces[0]
-                    if min(bbox[2] - bbox[0], bbox[3] - bbox[1]) < FACE_MIN_SIZE_PX:
-                        st.error(f"Move closer so your face is at least {FACE_MIN_SIZE_PX} pixels wide and tall.")
-                        return
                     # A recording that cannot be used must stop registration: no half-finished profile.
                     voice_emb = get_voice_embedding(check_audio_bytes(audio_bytes))
-                    rows = register_student(name, face_embedding.tolist(), voice_emb, _reserved=True, biometric_consent=True)
+                    rows = register_student(name, pending["embedding"], voice_emb, _reserved=True, biometric_consent=True)
                 except ValidationError as exc:
                     st.error(str(exc))
                     return
@@ -258,9 +244,43 @@ def _registration_form(photo) -> None:
                     st.error(str(exc))
                     return
             clear_gallery_cache()
+            st.session_state.pop("pending_face", None)
             _start_session(rows[0])
             st.session_state.flash = f"Profile created. Welcome, {rows[0]['name']}!"
             st.rerun()
+
+
+REGISTRATION_WINDOW_SECONDS = 600   # a passed face check is valid this long for completing registration
+
+
+def _handle_signin(res) -> None:
+    """Match the face from a PASSED liveness check against registered students."""
+    try:
+        _, ids, matrix = current_gallery()
+        result = match_encodings([np.asarray(res.embedding)], ids, matrix, bboxes=[res.bbox])
+        face = result.faces[0] if result.faces else None
+        student = get_student(next(iter(result.matched))) if len(result.matched) == 1 else None
+    except DatabaseError as exc:
+        st.error(str(exc))
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("Face matching failed")
+        st.error("Could not match your face right now. Please try again.")
+        return
+    if student:
+        _start_session(student)
+        st.session_state.flash = f"Welcome back, {student['name']}!"
+        st.rerun()
+    if face is not None and face.status in ("ambiguous", "duplicate"):
+        st.warning("Your face could not be matched confidently (it is very similar to another profile). "
+                   "Please ask your teacher to verify you; registering again would create a duplicate profile.")
+        return
+    if not face_size_ok(res.bbox, FACE_MIN_SIZE_PX):
+        st.warning(f"Your face was too small in the camera. Move closer (at least {FACE_MIN_SIZE_PX} pixels) and try again.")
+        return
+    st.session_state.pending_face = {"embedding": list(map(float, res.embedding)), "bbox": res.bbox, "at": time.time()}
+    st.session_state.new_student_name = ""
+    st.rerun()
 
 
 def student_screen():
@@ -278,37 +298,24 @@ def student_screen():
             st.query_params.clear()
             st.rerun()
 
-    page_header("Student sign in", "Look at the camera to sign in with FaceID. New here? You will be asked to register.")
-    photo = st.camera_input("Position your face in the centre of the frame")
-    if photo:
-        try:
-            with st.spinner("Scanning…"):
-                result = analyze_photo(photo)
-                student = get_student(next(iter(result.matched))) if len(result.matched) == 1 and result.num_faces == 1 else None
-        except DatabaseError as exc:
-            st.error(str(exc))
-            return
-        except Exception:  # noqa: BLE001
-            log.exception("Face scan failed")
-            st.error("Could not process the photo. Please try again.")
-            return
-
-        if result.num_faces == 0:
-            st.warning("No face found. Face the camera in good light and try again.")
-        elif result.num_faces > 1:
-            st.warning("More than one face found. Only one person should be in the frame.")
-        elif result.faces and result.faces[0].status in ("ambiguous", "duplicate"):
-            st.warning("Your face could not be matched confidently (it is very similar to another profile). "
-                       "Please ask your teacher to verify you; registering again would create a duplicate profile.")
-        elif student:
-            _start_session(student)
-            st.session_state.flash = f"Welcome back, {student['name']}!"
+    page_header("Student sign in", "A quick live face check signs you in. New here? You can register right after it.")
+    pending = st.session_state.get("pending_face")
+    if pending and time.time() - pending["at"] <= REGISTRATION_WINDOW_SECONDS:
+        st.success("Face check passed. This face is not registered yet, so create your profile below.")
+        _registration_form(pending)
+        if st.button("Start over", icon=":material/restart_alt:", key="registration_restart"):
+            st.session_state.pop("pending_face", None)
+            reset_face_check("signin")
             st.rerun()
-        else:
-            photo_digest = hashlib.sha256(photo.getvalue()).hexdigest()
-            if st.session_state.get("registration_photo_digest") != photo_digest:
-                st.session_state.registration_photo_digest = photo_digest
-                st.session_state.new_student_name = ""
-            st.info("Face not recognised. If you are new, register below.")
-            _registration_form(photo)
+        footer_dashboard()
+        return
+    st.session_state.pop("pending_face", None)
+
+    with st.container(key="signin_steps"):
+        st.markdown("1. Press **Start face check** and look at the camera.  \n"
+                    "2. When the prompt appears, blink the number of times shown.  \n"
+                    "3. You are signed in, or asked to register if you are new.")
+    res = face_check("signin", label="Start face check")
+    if res is not None:
+        _handle_signin(res)
     footer_dashboard()

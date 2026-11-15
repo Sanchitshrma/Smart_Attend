@@ -1,19 +1,15 @@
-"""Voice identification pipeline (Resemblyzer speaker embeddings + cosine similarity).
+"""Voice pipeline: voice profiles and the voice check for students the camera missed.
 
-Bulk attendance decides all speaking turns of one recording together:
-  1. split the recording into speaker turns (silence-based),
-  2. embed each turn (256-d Resemblyzer d-vector),
-  3. score each turn against EVERY stored voice profile (the cohort) and normalise the
-     scores (z-score), because raw cosine similarity between different Resemblyzer voices
-     is high (typically ~0.58) and a fixed raw threshold cannot separate students,
-  4. send a turn to review if a student from another class sounds as close,
-  5. apply "each student answers once": a turn that was ambiguous between A and B becomes
-     a match for B when another turn is already a confident match for A.
-Ambiguous and unknown turns are never marked present automatically.
+The camera marks most of the class. For the few students it could not recognise, the teacher calls
+only those names, and each answer is checked 1:1 ("is this really Rohan?") with `verify_speaker`:
+  * the answer's Resemblyzer d-vector (256-d) is compared with EVERY stored voice profile,
+  * scores are normalised against that crowd (z-score), because raw cosine similarity between
+    different voices is high (typically ~0.58),
+  * if another student's voice is clearly closer, the answer is rejected and that student is
+    named (a friend answering for someone else); unclear answers are left to the teacher.
 
-Heavy ML imports are lazy so the rest of the app (and unit tests) work without
-PyTorch installed. This module never touches Streamlit; failures raise
-`VoiceError` and the UI decides how to show them.
+Heavy ML imports are lazy so the rest of the app (and unit tests) work without PyTorch installed.
+This module never touches Streamlit; failures raise `VoiceError` and the UI decides how to show them.
 """
 from __future__ import annotations
 
@@ -27,18 +23,16 @@ import streamlit as st
 from dataclasses import dataclass, field
 
 from src.services import biometrics
-from src.settings import (VOICE_MATCH_MARGIN, VOICE_MATCH_THRESHOLD, VOICE_MIN_COHORT,
-                          VOICE_MIN_ZSCORE, VOICE_Z_MARGIN)
+from src.settings import (VOICE_ANSWER_MIN_SPEECH_SECONDS, VOICE_MATCH_MARGIN, VOICE_MATCH_THRESHOLD,
+                          VOICE_MIN_COHORT, VOICE_MIN_ZSCORE, VOICE_Z_MARGIN)
 from src.validation import MAX_AUDIO_SECONDS
 
 log = logging.getLogger("smartattend.voice")
 SAMPLE_RATE = 16000
 MAX_SECONDS = MAX_AUDIO_SECONDS
-MIN_SEGMENT_SECONDS = 0.6
 # A profile needs this much detected SPEECH (silence is trimmed first). The earlier rule counted the
 # whole recording, so 6 s with 1 s of speech passed while 4 s of continuous speech failed.
 VOICE_PROFILE_MIN_SPEECH_SECONDS = 3.0
-TURN_GAP_SECONDS = 0.7
 
 
 class VoiceError(RuntimeError):
@@ -80,6 +74,8 @@ def get_voice_embedding(audio_bytes: bytes) -> list[float]:
     from resemblyzer import preprocess_wav
 
     audio = _load_audio(audio_bytes)
+    if len(audio) > GROUP_MAX_SECONDS * SAMPLE_RATE:
+        raise VoiceError(f"The recording is too long (max {GROUP_MAX_SECONDS // 60} minutes). Record smaller groups.")
     quality = assess_audio(audio)
     if quality.fatal:
         raise VoiceError(" ".join(quality.issues))
@@ -96,6 +92,79 @@ def get_voice_embedding(audio_bytes: bytes) -> list[float]:
     except Exception as exc:  # noqa: BLE001
         log.exception("Voice embedding failed")
         raise VoiceError("Could not analyse the voice recording. Try a longer, clearer sample.") from exc
+
+
+def get_answer_embedding(audio_bytes: bytes) -> list[float]:
+    """Embed one student's spoken answer during a voice check (shorter than a profile recording)."""
+    from resemblyzer import preprocess_wav
+
+    audio = _load_audio(audio_bytes)
+    if len(audio) > GROUP_MAX_SECONDS * SAMPLE_RATE:
+        raise VoiceError(f"The recording is too long (max {GROUP_MAX_SECONDS // 60} minutes). Record smaller groups.")
+    quality = assess_audio(audio)
+    if quality.fatal:
+        raise VoiceError(" ".join(quality.issues))
+    try:
+        wav = preprocess_wav(audio)
+        if len(wav) < SAMPLE_RATE * VOICE_ANSWER_MIN_SPEECH_SECONDS:
+            raise VoiceError("The answer was too short. Ask the student to say the full sentence, "
+                             "e.g. “Present, ma’am. I am here in the class today.”")
+        return load_voice_encoder().embed_utterance(wav).tolist()
+    except VoiceError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Voice embedding failed")
+        raise VoiceError("Could not analyse the answer. Record it again in a quieter moment.") from exc
+
+
+@dataclass
+class VoiceCheck:
+    """Result of checking that a spoken answer really comes from the student whose name was called."""
+    status: str                      # verified | rejected | unsure | no_profile
+    score: float = 0.0               # cosine similarity with the called student's profile
+    zscore: float | None = None      # how far that score stands out from all stored voices
+    sounds_like: int | None = None   # another student whose voice is clearly closer (likely proxy)
+
+
+def verify_speaker(embedding, claimed_id: int, profiles: dict[int, list[float]],
+                   threshold: float = VOICE_MATCH_THRESHOLD, min_z: float = VOICE_MIN_ZSCORE,
+                   z_margin: float = VOICE_Z_MARGIN, margin: float = VOICE_MATCH_MARGIN,
+                   min_cohort: int = VOICE_MIN_COHORT) -> VoiceCheck:
+    """1:1 check: is this answer from `claimed_id`? `profiles` holds every stored voice (the cohort).
+
+    Verifying one claimed identity is a much easier question than picking a speaker out of a whole
+    class. If another student's voice is clearly closer, the answer is rejected and that student is
+    reported in `sounds_like` (a friend answering for someone else).
+    """
+    clean = {int(k): v for k, v in profiles.items() if biometrics.is_valid_embedding(v, biometrics.VOICE_DIM)}
+    if int(claimed_id) not in clean:
+        return VoiceCheck("no_profile")
+    e = np.asarray(embedding, dtype=np.float64)
+    ids = list(clean)
+    sims = _unit_rows([clean[i] for i in ids]) @ (e / (np.linalg.norm(e) or 1.0))
+    c = ids.index(int(claimed_id))
+    score = float(sims[c])
+    others = [k for k in range(len(ids)) if k != c]
+    rival = max(others, key=lambda k: sims[k]) if others else None
+
+    if len(ids) < min_cohort:  # too few voices to normalise against: raw rule
+        if rival is not None and sims[rival] > score + margin:
+            return VoiceCheck("rejected", score, None, ids[rival])
+        if score >= threshold:
+            return VoiceCheck("verified", score)
+        return VoiceCheck("rejected" if score < threshold - 0.1 else "unsure", score)
+
+    order = np.argsort(-sims)
+    rest = sims[order[3:]]
+    z = (sims - rest.mean()) / (rest.std() + 1e-9)
+    zc = float(z[c])
+    if rival is not None and z[rival] - zc >= z_margin:
+        return VoiceCheck("rejected", score, zc, ids[rival])
+    if score >= threshold and zc >= min_z and (rival is None or zc - z[rival] >= z_margin):
+        return VoiceCheck("verified", score, zc)
+    if score < threshold - 0.1 or zc < min_z - 1.5:
+        return VoiceCheck("rejected", score, zc)
+    return VoiceCheck("unsure", score, zc)
 
 
 def cosine_similarity(a, b) -> float:
@@ -159,8 +228,6 @@ class SpeakerMatch:
     score: float = 0.0
     second_score: float | None = None
     candidates: list[int] = field(default_factory=list)
-    zscore: float | None = None      # how far the best match stands out from all stored voices
-    flags: list[str] = field(default_factory=list)  # e.g. other_class_closer, resolved_answer_once
 
 
 def rank_speakers(embedding, candidates: dict[int, list[float]], threshold: float = VOICE_MATCH_THRESHOLD,
@@ -198,135 +265,206 @@ def _unit_rows(vectors) -> np.ndarray:
     return m / n
 
 
-def match_turns(embeddings, candidates: dict[int, list[float]], cohort: dict[int, list[float]] | None = None,
-                threshold: float = VOICE_MATCH_THRESHOLD, margin: float = VOICE_MATCH_MARGIN,
-                min_z: float = VOICE_MIN_ZSCORE, z_margin: float = VOICE_Z_MARGIN,
-                min_cohort: int = VOICE_MIN_COHORT) -> list[SpeakerMatch]:
-    """Decide every speaking turn of one recording together (see module docstring).
+# ============================================================ one recording for several students
+# The teacher calls the names of the students the camera missed, one after another, and records
+# all the answers in ONE recording. The recording is split into speakers (speaker diarization) and
+# each speaker is checked only against the called students (a small group, so this is far easier
+# than identifying a whole class). A voice that belongs to someone else is reported as a proxy.
 
-    `candidates`: voice profiles of students enrolled in the subject (only they can be matched).
-    `cohort`: voice profiles of ALL students (used to normalise scores and to spot a closer
-    voice from another class). With fewer than `min_cohort` usable profiles, z-scores are not
-    meaningful, so the raw threshold + margin rule (`rank_speakers`) is used for each turn.
-    """
-    for name, value, hi in (("threshold", threshold, 1.0), ("margin", margin, 2.0), ("min_z", min_z, 10.0), ("z_margin", z_margin, 5.0)):
-        if not math.isfinite(value) or not 0.0 <= value <= hi:
-            raise ValueError(f"Voice {name} must be finite and between 0 and {hi:g}.")
-    clean = {int(k): v for k, v in candidates.items() if biometrics.is_valid_embedding(v, biometrics.VOICE_DIM)}
-    pool = {int(k): v for k, v in (cohort or {}).items() if biometrics.is_valid_embedding(v, biometrics.VOICE_DIM)}
-    pool.update(clean)
-    turns = [np.asarray(e, dtype=np.float64) for e in embeddings if e is not None]
-    if not clean or not turns:
-        return [SpeakerMatch("unknown") for _ in turns]
-
-    if len(pool) < min_cohort:  # too few voices to normalise against: per-turn raw rule
-        results = [rank_speakers(e, clean, threshold, margin) for e in turns]
-        _answer_once(results, lambda k, allowed: rank_speakers(turns[k], {s: clean[s] for s in allowed}, threshold, margin), set(clean))
-        return results
-
-    ids = list(pool)
-    mat = _unit_rows([pool[i] for i in ids])
-    enrolled = set(clean)
-    scored = []
-    for e in turns:
-        sims = mat @ (e / (np.linalg.norm(e) or 1.0))
-        order = np.argsort(-sims)
-        rest = sims[order[3:]]  # leave out the closest few so a genuine match does not inflate the crowd
-        z = (sims - rest.mean()) / (rest.std() + 1e-9)
-        scored.append((sims, z, order))
-
-    def decide(k: int, allowed: set[int]) -> SpeakerMatch:
-        sims, z, order = scored[k]
-        cand = [j for j in order if ids[j] in allowed]
-        if not cand:
-            return SpeakerMatch("unknown")
-        b = cand[0]
-        best, best_z = float(sims[b]), float(z[b])
-        second = float(sims[cand[1]]) if len(cand) > 1 else None
-        if best < threshold or best_z < min_z:
-            return SpeakerMatch("unknown", None, max(best, 0.0), second, zscore=best_z)
-        top = order[0]
-        if ids[top] not in enrolled and z[top] >= best_z - z_margin:
-            return SpeakerMatch("ambiguous", None, best, second, [ids[b]], best_z, ["other_class_closer"])
-        close = [ids[j] for j in cand if sims[j] >= threshold and best_z - z[j] < z_margin]
-        if len(close) > 1:
-            return SpeakerMatch("ambiguous", None, best, second, close, best_z)
-        return SpeakerMatch("matched", ids[b], best, second, [ids[b]], best_z)
-
-    results = [decide(k, enrolled) for k in range(len(turns))]
-    _answer_once(results, decide, enrolled)
-    return results
-
-
-def _answer_once(results: list[SpeakerMatch], decide, enrolled: set[int]) -> None:
-    """Each student answers once: re-decide ambiguous turns without students already matched elsewhere."""
-    changed = True
-    while changed:
-        changed = False
-        taken = {r.student_id for r in results if r.status == "matched"}
-        for k, r in enumerate(results):
-            if r.status == "ambiguous" and "other_class_closer" not in r.flags:
-                again = decide(k, enrolled - taken)
-                if again.status == "matched":
-                    again.flags.append("resolved_answer_once")
-                    results[k] = again
-                    taken.add(again.student_id)
-                    changed = True
+VAD_FRAME_MS = 30
+VAD_FILL_SECONDS = 0.2           # pauses shorter than this stay inside one speech segment
+MIN_SPEECH_SECONDS = 0.5
+CHANGE_WINDOW_SECONDS = 1.2      # window on each side when looking for a change of speaker
+CHANGE_STEP_SECONDS = 0.25
+CHANGE_SIMILARITY = 0.55         # left/right windows less similar than this => new speaker
+SAME_SPEAKER_SIMILARITY = 0.85   # segments at least this similar are merged into one speaker
+MIN_TURN_SECONDS = 0.8
+GROUP_MAX_SECONDS = 180
+TEACHER_MAX_TURN_SECONDS = 1.5   # reading a name is short; a student's answer is longer
+GROUP_MIN_SPEAKER_SECONDS = 1.0     # shorter speakers (e.g. the teacher reading a name) are not judged
 
 
 @dataclass
-class BulkVoiceResult:
-    matched: dict[int, float] = field(default_factory=dict)
-    ambiguous: list[list[int]] = field(default_factory=list)  # candidate groups needing review
-    other_class: list[int] = field(default_factory=list)      # enrolled students a closer outside voice contested
-    best_scores: list[float] = field(default_factory=list)
-    segments: int = 0
+class Speaker:
+    segments: list[tuple[int, int]]
+    embedding: np.ndarray = field(repr=False)
+
+    @property
+    def seconds(self) -> float:
+        return sum(e - s for s, e in self.segments) / SAMPLE_RATE
+
+
+def speech_segments(audio: np.ndarray, sr: int = SAMPLE_RATE) -> list[tuple[int, int]]:
+    """Voice activity detection (WebRTC VAD), with short pauses filled and tiny bursts dropped."""
+    try:
+        import webrtcvad
+    except ImportError:  # energy fallback
+        import librosa
+        spans = librosa.effects.split(audio, top_db=30).tolist()
+    else:
+        vad = webrtcvad.Vad(2)
+        pcm = (np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes()
+        n = int(sr * VAD_FRAME_MS / 1000)
+        spans = []
+        for i in range(len(audio) // n):
+            if vad.is_speech(pcm[2 * i * n:2 * (i + 1) * n], sr):
+                s, e = i * n, (i + 1) * n
+                if spans and s - spans[-1][1] <= 0:
+                    spans[-1][1] = e
+                else:
+                    spans.append([s, e])
+    merged: list[list[int]] = []
+    for s, e in spans:
+        if merged and s - merged[-1][1] <= VAD_FILL_SECONDS * sr:
+            merged[-1][1] = e
+        else:
+            merged.append([s, e])
+    return [(s, e) for s, e in merged if e - s >= MIN_SPEECH_SECONDS * sr]
+
+
+def _embed(encoder, audio: np.ndarray) -> np.ndarray:
+    v = encoder.embed_utterance(audio)
+    return v / (np.linalg.norm(v) or 1.0)
+
+
+def split_on_speaker_change(audio: np.ndarray, segments, encoder) -> list[tuple[int, int]]:
+    """Split segments where the voice changes, even if two students left almost no pause."""
+    w, step, min_len = (int(x * SAMPLE_RATE) for x in (CHANGE_WINDOW_SECONDS, CHANGE_STEP_SECONDS, MIN_TURN_SECONDS))
+    out = []
+    todo = list(segments)
+    while todo:
+        s, e = todo.pop(0)
+        if e - s < 2 * max(w, min_len):
+            out.append((s, e))
+            continue
+        best_t, best_sim = None, 1.0
+        for t in range(s + max(w, min_len), e - max(w, min_len) + 1, step):
+            sim = float(_embed(encoder, audio[t - w:t]) @ _embed(encoder, audio[t:t + w]))
+            if sim < best_sim:
+                best_t, best_sim = t, sim
+        if best_t is not None and best_sim < CHANGE_SIMILARITY:
+            todo[:0] = [(s, best_t), (best_t, e)]   # look for more changes inside each half
+        else:
+            out.append((s, e))
+    return sorted(out)
+
+
+def cluster_speakers(audio: np.ndarray, segments, encoder) -> list[Speaker]:
+    """Merge segments spoken by the same person (agglomerative, average linkage on cosine)."""
+    groups = [[seg] for seg in segments]
+    embs = [_embed(encoder, audio[s:e]) for s, e in segments]
+    while len(groups) > 1:
+        best = (-1.0, None, None)
+        for i in range(len(groups)):
+            for j in range(i + 1, len(groups)):
+                sim = float(embs[i] @ embs[j])
+                if sim > best[0]:
+                    best = (sim, i, j)
+        sim, i, j = best
+        if sim < SAME_SPEAKER_SIMILARITY:
+            break
+        groups[i] += groups.pop(j)
+        embs.pop(j)
+        embs[i] = _embed(encoder, np.concatenate([audio[s:e] for s, e in groups[i]]))
+    return [Speaker(sorted(g), emb) for g, emb in zip(groups, embs)]
+
+
+def diarize(audio: np.ndarray, encoder=None) -> list[Speaker]:
+    """Who spoke when: voice activity -> split on speaker changes -> group by speaker."""
+    from resemblyzer.audio import normalize_volume
+
+    encoder = encoder or load_voice_encoder()
+    norm = np.clip(normalize_volume(audio.astype(np.float32), -30, increase_only=True), -1, 1)
+    segments = split_on_speaker_change(norm, speech_segments(norm), encoder)
+    return cluster_speakers(norm, segments, encoder)
+
+
+@dataclass
+class GroupCheck:
+    """Outcome of one recording for a group of called students."""
+    speakers: int = 0
+    verified: dict[int, float] = field(default_factory=dict)    # student_id -> similarity
+    unsure: dict[int, str] = field(default_factory=dict)        # student_id -> note for the teacher
+    proxies: list[int] = field(default_factory=list)            # students whose voice answered although not called
+    unknown_voices: int = 0                                      # voices matching nobody
     quality: AudioQuality | None = None
 
 
-def process_bulk_audio_detailed(audio_bytes: bytes, candidates: dict[int, list[float]],
-                                threshold: float = VOICE_MATCH_THRESHOLD, margin: float = VOICE_MATCH_MARGIN,
-                                cohort: dict[int, list[float]] | None = None, **match_kw) -> BulkVoiceResult:
-    """Split a classroom recording on silence and identify each speaker segment."""
-    import librosa
-    from resemblyzer import preprocess_wav
+def teacher_index(speakers: list[Speaker]) -> int | None:
+    """Find the teacher's voice: it reads every name, so it comes back many times in short bursts,
+    while each student answers once. Prefer the speaker with the most short turns (at least 2);
+    otherwise the voice heard first, if it comes back again."""
+    if len(speakers) < 2:
+        return None
+    short = [i for i, sp in enumerate(speakers)
+             if len(sp.segments) >= 2 and sp.seconds / len(sp.segments) <= TEACHER_MAX_TURN_SECONDS]
+    if short:
+        return max(short, key=lambda i: (len(speakers[i].segments), -speakers[i].segments[0][0]))
+    k = min(range(len(speakers)), key=lambda i: speakers[i].segments[0][0] if speakers[i].segments else 1 << 62)
+    return k if len(speakers[k].segments) >= 2 else None
 
-    audio = _load_audio(audio_bytes)
-    quality = assess_audio(audio)
-    if quality.fatal:
-        raise VoiceError(" ".join(quality.issues))
-    encoder = load_voice_encoder()
-    out = BulkVoiceResult(quality=quality)
-    spans = librosa.effects.split(audio, top_db=30).tolist()
-    # Keep the words in one spoken turn together. Without this, short word-sized
-    # fragments produce unstable speaker embeddings and are often rejected.
-    turns = []
-    max_gap = int(TURN_GAP_SECONDS * SAMPLE_RATE)
-    for start, end in spans:
-        if turns and start - turns[-1][1] <= max_gap:
-            turns[-1][1] = end
-        else:
-            turns.append([start, end])
 
-    embeddings = []
-    for start, end in turns:
-        if (end - start) < SAMPLE_RATE * MIN_SEGMENT_SECONDS:
+def verify_group(speakers: list[Speaker], called: list[int], profiles: dict[int, list[float]],
+                 min_seconds: float = GROUP_MIN_SPEAKER_SECONDS) -> GroupCheck:
+    """Match each speaker to at most one called student; report voices that belong to others.
+
+    Each (speaker, called student) pair uses the same 1:1 rule as `verify_speaker`, so a voice is
+    accepted only if it is close to that student AND clearly closer to them than to anyone else in
+    `profiles` (pass every stored voice so the comparison crowd is large). Very short speakers, such
+    as the teacher reading a name, are skipped because a second of speech is not enough to judge, and
+    so is the teacher's own voice (see `teacher_index`).
+    """
+    called = list(dict.fromkeys(int(c) for c in called))
+    out = GroupCheck(speakers=len(speakers))
+    if not speakers or not called:
+        return out
+    claims: list[tuple[float, int, int]] = []   # (score, speaker index, student)
+    teacher = teacher_index(speakers)
+    for k, sp in enumerate(speakers):
+        if sp.seconds < min_seconds or k == teacher:
             continue
-        try:
-            embeddings.append(encoder.embed_utterance(preprocess_wav(audio[start:end])))
-        except Exception:  # noqa: BLE001 - skip a bad segment, keep the rest
-            log.warning("Skipping an unreadable audio segment", exc_info=True)
-    out.segments = len(embeddings)
-    for m in match_turns(embeddings, candidates, cohort, threshold, margin, **match_kw):
-        out.best_scores.append(m.score)
-        if m.status == "matched" and m.score > out.matched.get(m.student_id, -1.0):
-            out.matched[m.student_id] = m.score
-        elif m.status == "ambiguous":
-            out.ambiguous.append(m.candidates)
-            if "other_class_closer" in m.flags:
-                out.other_class.extend(m.candidates)
+        checks = {sid: verify_speaker(sp.embedding, sid, profiles) for sid in called}
+        ok = [(c.score, sid) for sid, c in checks.items() if c.status == "verified"]
+        if ok:
+            score, sid = max(ok)
+            claims.append((float(score), k, sid))
+            continue
+        scored = [(c.score or 0.0, sid, c) for sid, c in checks.items() if c.status != "no_profile"]
+        if not scored:
+            continue
+        score, sid, best = max(scored, key=lambda x: x[0])
+        if best.sounds_like is not None and best.sounds_like not in called:
+            if best.sounds_like not in out.proxies:
+                out.proxies.append(best.sounds_like)   # sounds like someone who was not called
+        elif best.status == "unsure":
+            out.unsure.setdefault(sid, f"A voice was close to this student ({score:.2f}) but not clear enough")
+        else:
+            out.unknown_voices += 1
+    for score, k, sid in sorted(claims, reverse=True):   # each student is verified by one voice only
+        if sid in out.verified:
+            continue
+        out.verified[sid] = score
+        out.unsure.pop(sid, None)
     return out
 
 
-def process_bulk_audio(audio_bytes: bytes, candidates: dict[int, list[float]], threshold: float = VOICE_MATCH_THRESHOLD) -> dict[int, float]:
-    return process_bulk_audio_detailed(audio_bytes, candidates, threshold).matched
+def check_group_recording(audio_bytes: bytes, called: list[int], profiles: dict[int, list[float]]) -> GroupCheck:
+    """Decode one recording, run quality checks, diarize, and verify the called students."""
+    audio = _load_audio(audio_bytes)
+    if len(audio) > GROUP_MAX_SECONDS * SAMPLE_RATE:
+        raise VoiceError(f"The recording is too long (max {GROUP_MAX_SECONDS // 60} minutes). Record smaller groups.")
+    quality = assess_audio(audio)
+    if quality.fatal:
+        raise VoiceError(" ".join(quality.issues))
+    try:
+        speakers = diarize(audio)
+    except VoiceError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Diarization failed")
+        raise VoiceError("Could not analyse the recording. Please record again in a quieter moment.") from exc
+    if not speakers:
+        raise VoiceError("No clear speech was detected. Ask each student to answer clearly, one after another.")
+    result = verify_group(speakers, called, profiles)
+    result.quality = quality
+    return result

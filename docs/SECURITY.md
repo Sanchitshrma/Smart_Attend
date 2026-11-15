@@ -13,7 +13,7 @@ DB-enforced per-user policies: a larger change that needs your decision.
 ## Roles and account creation
 | Who | How they get access |
 |---|---|
-| Student | Public registration with a face photo and voice sample (rate-limited; duplicate faces rejected; explicit biometric consent recorded) |
+| Student | Public registration after a live blink check, with a voice sample (rate-limited; duplicate faces rejected; explicit biometric consent recorded) |
 | Teacher | **Only** via a single-use invitation created by an administrator (`register_teacher_with_invite`); codes stay valid until used or revoked |
 | Administrator | First one: `ADMIN_SETUP_TOKEN` + one-time setup form (closes after use; unique DB claim makes it atomic). Later ones: admin invitation |
 
@@ -26,7 +26,9 @@ Existing teachers keep working (migration 004 defaults: `teacher` / `active`).
 Teacher login: 5 failures / 15 min per username (also unknown usernames; the right password is refused while locked).
 Invitation guessing: 10 failures / hour globally. Admin setup: 5 / hour. Student registration: 30 attempts / hour globally;
 the attempt is reserved before face and voice inference, so failed submissions count too.
-Limits are per key, **not per IP**: Streamlit does not expose a trustworthy client IP. If the table is missing the check
+Student face sign-in: 8 failed / 30 total checks per 15 min per browser session, and 8x / 10x that per network
+address when Streamlit reports one (a whole class may share one address). Only SHA-256 hashes of these keys are stored.
+Other limits are per key, not per IP. If the table is missing the check
 **fails open** with a log warning for the existing throttles; public student registration fails closed unless migration
 008's atomic reservation function is installed. Profile deletion and consent metadata require migration 009.
 
@@ -44,14 +46,16 @@ Limits are per key, **not per IP**: Streamlit does not expose a trustworthy clie
 | **students (operator scripts)** | `scripts/import_synthetic_students.py`, `scripts/enroll_synthetic_students.py` | **bypass `db.py` and its checks**: run locally with your key, never expose; do not point them at production |
 
 ## Residual risks (not fixed)
-- A student's identity is a server-side session value set after a face match; there is no liveness check, so a printed photo may pass face sign-in.
+- A student's identity is a server-side session value set after a face match **and a blink liveness check** (random count, random time,
+  one-time challenge, same face in every frame). A printed photo or replayed video fails; a live deepfake or a very good mask is not
+  addressed. The student view is read-only and teachers review attendance, which limits the damage.
 - Student registration is public by design (rate-limited), so someone can create junk profiles up to the limit.
 - Voice and face thresholds/margins are not validated on real data (`evaluation/README.md`).
-- No per-IP limits; registration and login limits remain global/per username. Sessions now expire after configurable inactivity, but there is no separate account-change audit log for status changes or invitations.
+- Registration and teacher login limits remain global/per username (face sign-in also has session and network limits). Sessions now expire after configurable inactivity, but there is no separate account-change audit log for status changes or invitations.
 - The SQL triggers (marks rules, audit, biometric version) and the lockdown migration have **not been executed** in any automated test here.
 
 ## Deployment checklist
-1. Back up the database. 2. Run `schema.sql` (only if tables are missing), then migrations `002`, `003`, `004`, `005`, `006`, `007`, `008`, and `009` in order. Review migration `005` because it changes public API grants.
+1. Back up the database. 2. Run `schema.sql` (only if tables are missing), then migrations `002` through `010` in order (010 adds learned face templates; the app works without it, learning is just off). Review migration `005` because it changes public API grants.
 3. Run `supabase/verify_security.sql`; expect no rows from queries 1-5. 4. Set secrets: `SUPABASE_URL`, `SUPABASE_KEY` (secret key), `ADMIN_SETUP_TOKEN` (temporarily), `APP_BASE_URL`.
 5. Open the app → Teacher login → *First-time setup*, create the administrator, then **delete `ADMIN_SETUP_TOKEN`** and redeploy.
 6. Admin tab → create teacher invitations. 7. Run `python scripts/check_supabase_security.py` with the PUBLIC key; expect `RESULT: PASS`.

@@ -21,7 +21,7 @@ UNIQUE = {
     "subject_students": [("student_id", "subject_id")],
     "attendance_logs": [("subject_id", "student_id", "timestamp")],
 }
-PK = {"teacher_invitations": "invite_id", "auth_attempts": "attempt_id", "assessments": "assessment_id", "marks": "mark_id", "attendance_audit": "audit_id", "teachers": "teacher_id", "students": "student_id", "subjects": "subject_id", "attendance_logs": "log_id"}
+PK = {"face_templates": "template_id", "teacher_invitations": "invite_id", "auth_attempts": "attempt_id", "assessments": "assessment_id", "marks": "mark_id", "attendance_audit": "audit_id", "teachers": "teacher_id", "students": "student_id", "subjects": "subject_id", "attendance_logs": "log_id"}
 # table -> relation name -> (target table, local key, remote key, many?)
 REL = {
     "marks": {"assessments": ("assessments", "assessment_id", "assessment_id", False), "students": ("students", "student_id", "student_id", False)},
@@ -50,7 +50,8 @@ class FakeSupabase:
     def __init__(self):
         self.tables = {n: [] for n in ["teachers", "students", "subjects", "subject_students", "attendance_logs",
                                        "assessments", "marks", "attendance_audit", "marks_audit",
-                                       "teacher_invitations", "auth_attempts", "app_settings"]}
+                                       "teacher_invitations", "auth_attempts", "app_settings", "face_templates"]}
+        self.missing_tables: set[str] = set()   # simulates a database without a migration
         self.missing_columns: dict[str, set] = {}  # table -> columns that "do not exist yet" (simulates an un-migrated DB)
         self._ids = {n: itertools.count(1) for n in self.tables}
 
@@ -81,6 +82,7 @@ class RPCQuery:
                         if table == "attendance_logs":
                             row["student_status"] = "deleted"
             self.db.tables["subject_students"] = [r for r in self.db.tables["subject_students"] if r.get("student_id") != sid]
+            self.db.tables["face_templates"] = [r for r in self.db.tables["face_templates"] if r.get("student_id") != sid]  # ON DELETE CASCADE
             self.db.tables["students"].remove(student)
             return Result(True)
         if self.name == "reserve_student_registration_attempt":
@@ -165,6 +167,8 @@ class Query:
 
     # ------------------------------------------------------------------
     def execute(self):
+        if self.name in self.db.missing_tables:
+            raise APIError(f"Could not find the table 'public.{self.name}' in the schema cache", code="PGRST205")
         rows = self.db.tables[self.name]
         if self.op in ("insert", "upsert", "update"):
             bad = self.db.missing_columns.get(self.name, set())

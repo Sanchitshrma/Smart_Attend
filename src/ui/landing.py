@@ -101,26 +101,26 @@ div[data-testid="stExpander"] { max-width:800px; width:calc(100% - 2.5rem); marg
 """
 
 _FEATURES = [
-    ("camera", "Photo attendance", "Upload or capture classroom photos. Faces are matched against students enrolled in the selected subject, and you review every result before it is saved."),
-    ("mic", "Voice attendance", "Students can optionally enrol a short voice sample. Record the class saying “present” and SmartAttend matches each speaker."),
-    ("link", "Join by code, link or QR", "Every subject gets a unique code. Students enrol by typing it, opening a join link, or scanning the QR code."),
-    ("check", "Review before saving", "Nothing is recorded automatically. You confirm a clear present/absent table first, and saving the same session twice never creates duplicates."),
-    ("chart", "Records and reports", "See attendance rate per subject and every session, filter by subject, and export a CSV of the detailed log."),
-    ("users", "Student view", "Students sign in with their face and see the subjects they are enrolled in with their own attendance totals."),
+    ("camera", "Live camera attendance", "Pan your phone across the room for a few seconds. Every face is checked in several frames, so students at the back or turning their heads are still found. No video file is saved."),
+    ("mic", "One voice check for the rest", "For students the camera missed, read their names in one recording. SmartAttend separates the voices and confirms each one against that student’s voice sample, so a friend answering for someone is flagged."),
+    ("shield", "Blink check at sign-in", "Students sign in and register with a live face check: the app asks for a random number of blinks at a random moment, so a printed photo or a replayed video does not work."),
+    ("check", "Review before saving", "Nothing is recorded automatically. You confirm a clear present/absent list first, and saving the same session twice never creates duplicates."),
+    ("users", "Learns over time", "After you confirm a session, SmartAttend can keep a few extra face samples per student, so recognition improves as the term goes on."),
+    ("chart", "Records and reports", "Attendance rate per subject, students at risk, corrections with an audit trail, marks, and CSV export."),
 ]
 _STEPS = [
-    ("Create a subject", "Teachers register, then create a subject and share its code, link or QR."),
-    ("Students enrol", "Students register once with a face photo (voice is optional) and join using the code."),
-    ("Capture the class", "Add one or more classroom photos, or record audio, for the chosen subject."),
-    ("Review and confirm", "Check the present/absent list, then confirm to save the session."),
-    ("Track results", "Open the dashboard for session history, attendance rates and CSV export."),
+    ("Create a subject", "Teachers sign in, create a subject and share its code, link or QR."),
+    ("Students enrol", "Students register once with a live face check and a short voice sample, then join with the code."),
+    ("Capture the class", "Use the live camera (or upload a clip or photos) for the chosen subject."),
+    ("Check the rest by voice", "Call the names the camera missed in one recording; matching voices are marked present."),
+    ("Review and save", "Confirm the list, then track rates, corrections and exports on the dashboard."),
 ]
 _FAQ = [
-    ("Does SmartAttend store photos or recordings?", "The application code does not save classroom photos, registration photos or audio recordings. They are processed in memory. What is stored is a numeric face embedding (and an optional voice embedding) per student, plus attendance records."),
-    ("Is face data sensitive?", "Yes. Face and voice embeddings are biometric data. Get consent from students (and guardians where required) and check the rules that apply to your institution and region before using SmartAttend."),
-    ("How accurate is recognition?", "It depends on lighting, image resolution and face angle. That is why results are always shown for review before they are saved, and a teacher can run several photos per session. The match threshold is configurable."),
-    ("Can someone sign in with a photo of a student?", "Student sign-in uses face matching only and has no liveness check, so a printed photo could fool it. The student view is read-only, but treat this as a known limitation."),
-    ("Do students need an account?", "Students register once with a face photo and a name. Teacher accounts are created from an invitation issued by an administrator, so the public cannot give themselves teacher access."),
+    ("Does SmartAttend store photos, video or recordings?", "No. Camera frames, uploaded clips and audio are processed in memory and then discarded. What is stored is a numeric face template and voice template per student, plus attendance records."),
+    ("Is face data sensitive?", "Yes. Face and voice templates are biometric data. Students give consent when they register, can delete their profile at any time, and institutions should check the rules that apply to them."),
+    ("How accurate is recognition?", "It depends on lighting, distance and camera quality. That is why the app never forces a match: unclear faces and voices are left for the teacher, and every result is reviewed before it is saved."),
+    ("Can someone sign in with a photo of a student?", "Not easily. Sign-in needs a live blink check with a random count at a random time, the same face in every frame, and it is rate limited. A very determined attacker with a live deepfake could still try, so the student view stays read-only and teachers review attendance."),
+    ("Do students need an account?", "Students register once with a live face check, a name and a voice sample. Teacher accounts are created from an invitation issued by an administrator, so the public cannot give themselves teacher access."),
 ]
 
 
@@ -144,8 +144,8 @@ def landing_page() -> None:
     <section class="lp-hero" id="top"><div class="lp-wrap">
       <div>
         <span class="lp-eyebrow">AI-assisted classroom attendance</span>
-        <h1>Take attendance from a <span class="hl">photo</span>, not a roll call.</h1>
-        <p class="lp-lead">SmartAttend recognises enrolled students in classroom photos or voice recordings, lets you review the result, and keeps a clean attendance record for every subject.</p>
+        <h1>Take attendance with a <span class="hl">quick camera pan</span>, not a roll call.</h1>
+        <p class="lp-lead">SmartAttend recognises enrolled students from a few seconds of live camera, checks the few it missed with one short voice recording, and lets you review everything before it is saved.</p>
         <div class="lp-cta">
           <a class="lp-btn primary lg" href="{S}" target="_self">Student portal</a>
           <a class="lp-btn lg" href="{T}" target="_self">Teacher login</a>
@@ -154,8 +154,8 @@ def landing_page() -> None:
       </div>
       <div class="lp-preview" role="img" aria-label="Illustration of the attendance review screen">
         <div class="lp-pv-head"><span>Review attendance</span><span class="lp-badge">Illustration · not real data</span></div>
-        <div class="lp-row"><span>Student A</span><span class="lp-ok">Present · Photo 1</span></div>
-        <div class="lp-row"><span>Student B</span><span class="lp-ok">Present · Photo 2</span></div>
+        <div class="lp-row"><span>Student A</span><span class="lp-ok">Present · Camera</span></div>
+        <div class="lp-row"><span>Student B</span><span class="lp-ok">Present · Voice check</span></div>
         <div class="lp-row"><span>Student C</span><span class="lp-no">Absent</span></div>
         <div class="lp-btn-fake">Confirm &amp; Save</div>
       </div>
@@ -172,7 +172,7 @@ def landing_page() -> None:
     <section class="lp-sec alt" id="privacy"><div class="lp-wrap">
       <h2>Privacy and security, stated plainly</h2><p class="lp-sub">What SmartAttend does today, without overpromising.</p>
       <div class="lp-grid">
-        <div class="lp-card"><div class="lp-ico">{icon('shield')}</div><h3>Embeddings, not images</h3><p>Photos and audio are processed in memory and not saved by the app. Only numeric embeddings and attendance rows are stored.</p></div>
+        <div class="lp-card"><div class="lp-ico">{icon('shield')}</div><h3>Embeddings, not images</h3><p>Camera frames and audio are processed in memory and never saved. Only numeric templates and attendance rows are stored.</p></div>
         <div class="lp-card"><div class="lp-ico">{icon('shield')}</div><h3>Protected credentials</h3><p>Teacher passwords are hashed with bcrypt. Database keys stay on the server and are never sent to the browser.</p></div>
         <div class="lp-card"><div class="lp-ico">{icon('shield')}</div><h3>Teachers see their own classes</h3><p>Subjects and records are scoped to the signed-in teacher. Students only see their own enrolments and attendance.</p></div>
       </div>
@@ -184,7 +184,7 @@ def landing_page() -> None:
             st.write(a)
     html('<div style="height:3.5rem"></div>')
     html(f"""
-    <section class="lp-final"><h2>Ready to simplify attendance?</h2><p>Teachers join by invitation from their administrator. Students can register with a face photo.</p>
+    <section class="lp-final"><h2>Ready to simplify attendance?</h2><p>Teachers join by invitation from their administrator. Students register with a quick live face check.</p>
       <a class="lp-btn lg" href="{TR}" target="_self">I have a teacher invitation</a></section>
     <footer class="lp-foot"><div class="lp-wrap"><div>© SmartAttend</div>
       <div><a href="#features">Features</a><a href="#how">How it works</a><a href="#faq">FAQ</a><a href="{T}" target="_self">Teacher login</a><a href="{S}" target="_self">Student portal</a></div></div></footer>

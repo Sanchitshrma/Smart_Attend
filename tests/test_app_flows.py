@@ -122,7 +122,7 @@ def test_teacher_dashboard_shows_real_numbers_in_every_tab(fake_db):
     at = run(login_type="teacher", teacher_data=t, is_logged_in=True, user_role="teacher")
     assert not at.exception
     m = {x.label: x.value for x in at.metric}
-    assert m == {"Subjects": "2", "Enrolled students": "4", "Sessions taken": "1", "Overall attendance": "66.7%"}
+    assert m == {"Subjects": "2", "Enrolments": "4", "Sessions taken": "1", "Overall attendance": "66.7%"}
     for tab in ("Take attendance", "Subjects", "Records"):
         at.segmented_control[0].set_value(tab).run()
         assert not at.exception, tab
@@ -171,7 +171,7 @@ def test_teacher_can_correct_a_record_through_the_ui_and_it_is_audited(fake_db):
     at = run(login_type="teacher", teacher_data=t, is_logged_in=True, user_role="teacher")
     at.segmented_control[0].set_value("Records").run()
     assert not at.exception
-    at.selectbox(key="corr_student").set_value("Bo")          # Bo was absent in the seeded session
+    at.selectbox(key="corr_student").set_value(stu[1])        # Bo was absent in the seeded session (keyed by id: names can repeat)
     at.radio(key="corr_new").set_value("Present")
     at.button(key="corr_save").click().run()
     assert any("Please give a reason" in e.value for e in at.error)         # reason is mandatory

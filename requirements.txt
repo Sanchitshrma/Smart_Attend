@@ -3,6 +3,7 @@ streamlit>=1.50,<2
 supabase>=2.0,<3
 bcrypt>=4.0
 numpy
+tzdata
 pandas
 pillow
 segno
@@ -12,7 +13,11 @@ dlib-bin
 git+https://github.com/ageitgey/face_recognition_models
 setuptools<70.0.0
 
+# Video attendance: frame decoding (headless build, no GUI libraries needed)
+opencv-python-headless
+
 # Voice attendance (optional, heavy: installs PyTorch). The app runs without it
 # and shows a clear message if voice features are used.
 librosa
 resemblyzer
+webrtcvad-wheels    # voice activity detection for the one-recording voice check

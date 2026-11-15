@@ -73,12 +73,42 @@ a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visib
 /* Buttons */
 .stButton > button, .stDownloadButton > button, button[data-testid^="stBaseButton"] {{
   border-radius:12px; font-weight:600; min-height:2.75rem; transition:background .15s, box-shadow .15s, transform .15s; }}
-button[data-testid="stBaseButton-primary"] {{ background:var(--sa-primary); color:#fff; border:1px solid var(--sa-primary); }}
-button[data-testid="stBaseButton-primary"]:hover {{ background:var(--sa-primary-dark); border-color:var(--sa-primary-dark); box-shadow:0 6px 16px rgba(79,70,229,.28); transform:translateY(-1px); }}
+button[data-testid="stBaseButton-primary"], button[data-testid="stBaseButton-primaryFormSubmit"] {{ background:var(--sa-primary); color:#fff; border:1px solid var(--sa-primary); }}
+button[data-testid="stBaseButton-primary"]:hover, button[data-testid="stBaseButton-primaryFormSubmit"]:hover {{ background:var(--sa-primary-dark); border-color:var(--sa-primary-dark); box-shadow:0 6px 16px rgba(79,70,229,.28); transform:translateY(-1px); }}
 button[data-testid="stBaseButton-secondary"] {{ background:#fff; color:var(--sa-ink); border:1px solid var(--sa-border); }}
 button[data-testid="stBaseButton-secondary"]:hover {{ border-color:var(--sa-primary); color:var(--sa-primary); }}
 button[data-testid="stBaseButton-tertiary"] {{ color:var(--sa-muted); }}
 button:disabled {{ opacity:.55; }}
+button[data-variant="segmented_control"] {{ border-radius:10px; font-weight:600; }}
+button[data-variant="segmented_control"][aria-checked="true"] {{ background:var(--sa-primary-soft) !important; color:var(--sa-primary-dark) !important; border-color:var(--sa-primary) !important; }}
+input[type="checkbox"] {{ accent-color:var(--sa-primary); }}
+
+/* Top bar: brand on the left, name and actions on the right, one line on every screen size */
+.st-key-sa_topbar div[data-testid="stHorizontalBlock"] {{ flex-wrap:nowrap !important; align-items:center; gap:.5rem; }}
+.st-key-sa_topbar div[data-testid="stColumn"] {{ min-width:0 !important; width:auto !important; }}
+.st-key-sa_topbar div[data-testid="stColumn"]:first-child {{ flex:1 1 auto !important; }}
+.st-key-sa_topbar div[data-testid="stColumn"]:last-child {{ flex:0 1 auto !important; }}
+.st-key-sa_topbar .stButton, .st-key-sa_topbar .stButton > button {{ width:auto !important; white-space:nowrap; }}
+.sa-user {{ display:flex; align-items:center; justify-content:flex-end; gap:.5rem; font-weight:600; color:var(--sa-ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.sa-user .sa-avatar {{ flex:0 0 auto; width:32px; height:32px; border-radius:50%; background:var(--sa-primary-soft); color:var(--sa-primary-dark); display:inline-flex; align-items:center; justify-content:center; font-size:.85rem; font-weight:700; }}
+.sa-user .sa-uname {{ overflow:hidden; text-overflow:ellipsis; }}
+
+/* Section navigation: one scrollable row instead of wrapping */
+.st-key-teacher_tab div[data-testid="stButtonGroup"] div:has(> button[data-variant="segmented_control"]) {{ flex-wrap:nowrap !important; overflow-x:auto; scrollbar-width:none; }}
+.st-key-teacher_tab button[data-variant="segmented_control"] {{ flex:0 0 auto; white-space:nowrap; }}
+
+/* Attendance review rows: name + evidence on the left, the Present checkbox on the right */
+.st-key-attendance_review_grid {{ border:1px solid var(--sa-border); border-radius:14px; background:#fff; padding:.15rem .75rem; }}
+.st-key-attendance_review_grid div[data-testid="stHorizontalBlock"] {{ flex-wrap:nowrap !important; align-items:center; gap:.5rem; }}
+.st-key-attendance_review_grid div[data-testid="stColumn"]:first-child {{ flex:1 1 auto !important; min-width:0 !important; width:auto !important; }}
+.st-key-attendance_review_grid div[data-testid="stColumn"]:last-child {{ flex:0 0 auto !important; min-width:0 !important; width:auto !important; }}
+div[class*="st-key-review_row_"] {{ border-bottom:1px solid var(--sa-border); padding:.45rem 0; }}
+div[class*="st-key-review_row_"]:last-child {{ border-bottom:none; }}
+.sa-row-name {{ font-weight:600; display:flex; flex-wrap:wrap; align-items:center; gap:.45rem; line-height:1.3; }}
+.sa-row-detail {{ color:var(--sa-muted); font-size:.85rem; margin-top:.1rem; overflow-wrap:anywhere; }}
+.sa-badge {{ display:inline-block; padding:.08rem .5rem; border-radius:999px; font-size:.72rem; font-weight:700; }}
+.sa-badge-present {{ background:#DCFCE7; color:#166534; }}
+.sa-badge-absent {{ background:#FEE2E2; color:#991B1B; }}
 
 /* Cards, metrics, inputs */
 div[data-testid="stMetric"] {{ background:var(--sa-card); border:1px solid var(--sa-border); border-radius:16px; padding:1rem 1.1rem; box-shadow:0 1px 2px rgba(15,23,42,.04); }}
@@ -131,21 +161,19 @@ div[data-testid="stDataFrame"] {{ border:1px solid var(--sa-border); border-radi
     width:calc(100vw - 1rem) !important; max-width:calc(100vw - 1rem) !important;
     max-height:94dvh !important; overflow-y:auto !important;
   }}
-  .st-key-attendance_review_grid {{ max-width:100%; overflow-x:auto; padding-bottom:.5rem; }}
-  .st-key-attendance_review_grid div[data-testid="stHorizontalBlock"] {{
-    flex-wrap:nowrap !important; min-width:640px;
-  }}
-  .st-key-attendance_review_grid div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {{
-    flex:1 1 0% !important; width:auto !important; min-width:0 !important;
-  }}
-  .st-key-attendance_review_grid div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(1) {{ flex:2 1 0% !important; }}
-  .st-key-attendance_review_grid div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{ flex:.8 1 0% !important; }}
-  .st-key-attendance_review_grid div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3) {{ flex:.9 1 0% !important; }}
-  .st-key-attendance_review_grid div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(4) {{ flex:1.5 1 0% !important; }}
-  .st-key-attendance_review_grid div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(5) {{ flex:2.2 1 0% !important; }}
+  /* Metric rows: two per line on phones instead of one tall stack */
+  div[class*="st-key-sa_metrics"] div[data-testid="stHorizontalBlock"] {{ flex-wrap:wrap !important; gap:.6rem !important; }}
+  div[class*="st-key-sa_metrics"] div[data-testid="stColumn"] {{ flex:1 1 calc(50% - .6rem) !important; min-width:calc(50% - .6rem) !important; width:auto !important; }}
+  div[data-testid="stMetricValue"] {{ font-size:1.6rem; }}
+  /* Image strips: keep four thumbnails per row */
+  .st-key-capture_ready div[data-testid="stHorizontalBlock"] {{ flex-wrap:wrap !important; gap:.4rem !important; }}
+  .st-key-capture_ready div[data-testid="stColumn"] {{ flex:1 1 calc(25% - .4rem) !important; min-width:calc(25% - .4rem) !important; width:auto !important; }}
+  .st-key-sa_topbar .sa-brand {{ font-size:1.15rem; }}
+  .st-key-sa_topbar .sa-brand svg {{ width:30px; height:30px; }}
 }}
 @media (max-width:420px) {{
   .block-container {{ padding:.75rem .6rem 1.5rem; }}
+  .sa-user .sa-uname {{ display:none; }}
   div[data-testid="stMetric"] {{ padding:.75rem; }}
   div[data-testid="stExpander"] {{ border-radius:12px; }}
 }}
@@ -175,6 +203,13 @@ def brand_html(link: bool = False) -> str:
     tag = "a" if link else "div"
     href = ' href="/" target="_self"' if link else ""
     return f'<{tag} class="sa-brand"{href}>{_logo_symbol()}<span>Smart<span style="color:var(--sa-primary)">Attend</span></span></{tag}>'
+
+
+def user_badge(name: str) -> str:
+    import html as _h
+    initials = "".join(w[0] for w in str(name).split()[:2]).upper() or "?"
+    return (f'<div class="sa-user" title="{_h.escape(str(name))}"><span class="sa-avatar">{_h.escape(initials)}</span>'
+            f'<span class="sa-uname">{_h.escape(str(name))}</span></div>')
 
 
 def page_header(title: str, subtitle: str = "") -> None:

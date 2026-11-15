@@ -1,0 +1,202 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: transparent; color: #0f172a; font: 15px/1.45 Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .wrap { padding: 2px; }
+    .stage { position: relative; width: 100%; max-width: 720px; margin: 0 auto; aspect-ratio: 4 / 3; background: #0f172a; border-radius: 16px; overflow: hidden; }
+    .stage.portrait { aspect-ratio: 3 / 4; max-width: 340px; margin: 0 auto; }
+    video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    video.mirror { transform: scaleX(-1); }
+    .overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; text-align: center; padding: 16px; }
+    .oval { position: absolute; left: 50%; top: 46%; width: 62%; height: 70%; transform: translate(-50%, -50%); border: 3px dashed rgba(255,255,255,.75); border-radius: 50%; transition: border-color .2s; }
+    .oval.go { border: 4px solid #22c55e; }
+    .prompt { position: absolute; left: 0; right: 0; bottom: 14px; margin: 0 auto; width: fit-content; max-width: 92%; background: rgba(15,23,42,.78); color: #fff; padding: 8px 14px; border-radius: 999px; font-weight: 700; font-size: 16px; }
+    .prompt.big { font-size: 22px; background: #4f46e5; }
+    .rec { position: absolute; top: 12px; left: 12px; display: none; align-items: center; gap: 6px; background: rgba(15,23,42,.7); color: #fff; padding: 4px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; }
+    .rec.on { display: flex; }
+    .rec i { width: 9px; height: 9px; border-radius: 50%; background: #ef4444; animation: pulse 1s infinite; }
+    @keyframes pulse { 50% { opacity: .3; } }
+    .bar { position: absolute; left: 0; bottom: 0; height: 5px; width: 0; background: #22c55e; transition: width .1s linear; }
+    .placeholder { color: #cbd5e1; font-size: 15px; padding: 0 20px; }
+    .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    button { flex: 1 1 140px; min-height: 46px; padding: 10px 14px; border: 1px solid #cbd5e1; border-radius: 12px; background: #fff; color: #0f172a; font: inherit; font-weight: 600; cursor: pointer; }
+    button.primary { background: #4f46e5; color: #fff; border-color: #4f46e5; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button:focus-visible { outline: 3px solid #818cf8; outline-offset: 2px; }
+    #status { min-height: 22px; margin: 8px 2px 0; color: #475569; font-size: 14px; }
+    #status.err { color: #b91c1c; }
+    @media (prefers-reduced-motion: reduce) { .rec i { animation: none; } .bar { transition: none; } }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div id="stage" class="stage">
+    <video id="video" playsinline muted></video>
+    <div class="overlay">
+      <div id="placeholder" class="placeholder">Camera is off</div>
+      <div id="oval" class="oval" hidden></div>
+      <div id="prompt" class="prompt" hidden></div>
+    </div>
+    <div id="rec" class="rec"><i></i><span id="rectext">Recording</span></div>
+    <div id="bar" class="bar"></div>
+  </div>
+  <div class="row">
+    <button id="start" class="primary">Start camera</button>
+    <button id="flip" hidden>Switch camera</button>
+  </div>
+  <div id="status" role="status" aria-live="polite"></div>
+</div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const video = $("video"), startBtn = $("start"), flipBtn = $("flip"), status = $("status");
+  const promptEl = $("prompt"), oval = $("oval"), rec = $("rec"), recText = $("rectext"), bar = $("bar");
+  let args = {}, stream = null, facing = "environment", busy = false, requestId = 0, started = false;
+  const canvas = document.createElement("canvas");
+
+  function post(type, value) { window.parent.postMessage({isStreamlitMessage: true, type, ...value}, "*"); }
+  function setHeight() { post("streamlit:setFrameHeight", {height: document.body.scrollHeight + 4}); }
+  function say(text, err) { status.textContent = text || ""; status.className = err ? "err" : ""; setHeight(); }
+  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  async function openCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      say("This browser cannot open the camera. Use Chrome, Safari or Edge over https.", true); return false;
+    }
+    stopCamera();
+    try {
+      const wantW = args.mode === "liveness" ? 640 : 1280;
+      stream = await navigator.mediaDevices.getUserMedia({audio: false, video: {
+        facingMode: {ideal: facing}, width: {ideal: wantW}, height: {ideal: Math.round(wantW * 0.75)}}});
+    } catch (e) {
+      const denied = e && (e.name === "NotAllowedError" || e.name === "SecurityError");
+      say(denied ? "Camera access was blocked. Allow the camera in your browser settings, then try again."
+                 : "No camera could be opened. Check that no other app is using it.", true);
+      return false;
+    }
+    video.srcObject = stream;
+    video.classList.toggle("mirror", facing === "user");
+    await video.play().catch(() => {});
+    for (let i = 0; i < 40 && !video.videoWidth; i++) await sleep(50);
+    $("placeholder").hidden = true;
+    const tracks = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+    flipBtn.hidden = args.mode === "liveness" || tracks.filter((d) => d.kind === "videoinput").length < 2;
+    setHeight();
+    return true;
+  }
+  function stopCamera() {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    stream = null; video.srcObject = null; $("placeholder").hidden = false;
+  }
+  function grab(maxSide, quality) {
+    const w = video.videoWidth, h = video.videoHeight;
+    if (!w || !h) return null;
+    const k = Math.min(1, maxSide / Math.max(w, h));
+    canvas.width = Math.round(w * k); canvas.height = Math.round(h * k);
+    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", quality);
+  }
+
+  async function recordAttendance() {
+    const seconds = Math.max(3, Math.min(20, Number(args.seconds) || 8));
+    const fps = Math.max(1, Math.min(6, Number(args.fps) || 3));
+    const frames = [], times = [];
+    rec.classList.add("on");
+    promptEl.hidden = false; promptEl.className = "prompt";
+    promptEl.textContent = "Pan slowly across the room";
+    const t0 = performance.now(); const step = 1000 / fps;
+    let next = 0;
+    while (true) {
+      const t = performance.now() - t0;
+      if (t >= seconds * 1000) break;
+      if (t >= next) {
+        const f = grab(1280, 0.82);
+        if (f) { frames.push(f); times.push(Math.round(t)); }
+        next += step;
+      }
+      bar.style.width = (100 * t / (seconds * 1000)) + "%";
+      recText.textContent = "Recording " + Math.ceil(seconds - t / 1000) + " s";
+      await sleep(30);
+    }
+    return {frames, times};
+  }
+
+  async function recordLiveness() {
+    const promptAt = Math.max(300, Number(args.prompt_at_ms) || 1200);
+    const total = promptAt + (Number(args.after_prompt_ms) || 3500);
+    const blinks = Math.max(1, Math.min(3, Number(args.blinks) || 1));
+    const frames = [], times = [];
+    oval.hidden = false; oval.classList.remove("go");
+    promptEl.hidden = false; promptEl.className = "prompt"; promptEl.textContent = "Look at the camera…";
+    rec.classList.add("on"); recText.textContent = "Checking";
+    const t0 = performance.now(); let next = 0; let shown = false;
+    while (true) {
+      const t = performance.now() - t0;
+      if (t >= total) break;
+      if (!shown && t >= promptAt) {
+        shown = true; oval.classList.add("go"); promptEl.className = "prompt big";
+        promptEl.textContent = blinks === 1 ? "Blink once now" : ("Blink " + blinks + " times now");
+      }
+      if (t >= next) {
+        const f = grab(480, 0.72);
+        if (f) { frames.push(f); times.push(Math.round(t)); }
+        next += 1000 / 12;
+      }
+      bar.style.width = (100 * t / total) + "%";
+      await sleep(15);
+    }
+    return {frames, times};
+  }
+
+  async function run() {
+    if (busy) return;
+    busy = true; startBtn.disabled = true; flipBtn.disabled = true;
+    try {
+      if (!stream && !(await openCamera())) return;
+      say(args.mode === "liveness" ? "Keep your face inside the oval." : "Hold the phone steady and pan slowly from one side of the room to the other.");
+      await sleep(args.mode === "liveness" ? 600 : 300);
+      const data = args.mode === "liveness" ? await recordLiveness() : await recordAttendance();
+      rec.classList.remove("on"); bar.style.width = "0";
+      promptEl.className = "prompt"; promptEl.textContent = "Checking…";
+      if (data.frames.length < 3) { say("The camera did not deliver any frames. Please try again.", true); return; }
+      requestId += 1;
+      say(args.mode === "liveness" ? "Checking the recording…" : "Captured " + data.frames.length + " frames. Press Run face analysis below.");
+      post("streamlit:setComponentValue", {dataType: "json", value: {
+        submitted: true, request_id: Date.now() + "-" + requestId, nonce: args.nonce || null,
+        frames: data.frames, times: data.times, mode: args.mode}});
+      if (args.mode === "liveness") stopCamera();
+    } finally {
+      busy = false; startBtn.disabled = false; flipBtn.disabled = false;
+      startBtn.textContent = args.mode === "liveness" ? "Try again" : "Record again";
+      setTimeout(() => { promptEl.hidden = true; oval.hidden = true; }, 600);
+    }
+  }
+
+  startBtn.addEventListener("click", run);
+  flipBtn.addEventListener("click", async () => { facing = facing === "user" ? "environment" : "user"; await openCamera(); });
+
+  window.addEventListener("message", (event) => {
+    if (!event.data || event.data.type !== "streamlit:render") return;
+    const a = event.data.args || {};
+    const changed = a.nonce !== args.nonce;
+    args = a;
+    if (!started || changed) {
+      started = true;
+      facing = a.mode === "liveness" ? "user" : (a.facing || "environment");
+      $("stage").classList.toggle("portrait", a.mode === "liveness");
+      startBtn.textContent = a.label || (a.mode === "liveness" ? "Start face check" : "Start recording");
+      say(a.hint || "");
+    }
+    setHeight();
+  });
+  window.addEventListener("resize", setHeight);
+  post("streamlit:componentReady", {apiVersion: 1});
+  setHeight();
+})();
+</script>
+</body>
+</html>

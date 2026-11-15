@@ -9,7 +9,8 @@ def header_dashboard():
     The brand is deliberately not a link here: a link would reload the page and
     end the signed-in session.
     """
-    left, right = st.columns([3, 2], vertical_alignment="center")
-    with left:
-        html(brand_html(link=False))
+    with st.container(key="sa_topbar"):
+        left, right = st.columns([3, 2], vertical_alignment="center")
+        with left:
+            html(brand_html(link=False))
     return right
