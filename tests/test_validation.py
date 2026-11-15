@@ -36,8 +36,9 @@ def png(size=(8, 8), mode="RGB", fmt="PNG"):
 def test_image_validation_by_content_not_by_name():
     assert v.check_image_bytes(png()).size == (8, 8)
     assert v.check_image_bytes(png(fmt="JPEG"))
+    assert v.check_image_bytes(png(fmt="GIF")) and v.check_image_bytes(png(fmt="BMP"))  # accepted on purpose
     for raw, why in ((b"", "empty"), (b"GIF89a....", "not a valid image"), (b"<html>not an image</html>", "not a valid image"),
-                     (png()[:40], "not a valid image"), (png(fmt="GIF"), "JPEG and PNG"), (png(fmt="BMP"), "JPEG and PNG"),
+                     (png()[:40], "not a valid image"),
                      (b"\xff\xd8\xff" + b"\x00" * 50, "not a valid image")):
         with pytest.raises(v.ValidationError, match=why):
             v.check_image_bytes(raw)
@@ -84,8 +85,8 @@ def test_a_failed_voice_enrolment_never_leaves_a_complete_looking_profile(fake_d
 
 
 def test_subject_creation_validated_server_side(fake_db):
-    db.create_teacher("t1", "password-1", "Tee One")
-    t = db.teacher_login("t1", "password-1")["teacher_id"]
+    db.create_teacher("tee1", "password-1", "Tee One")
+    t = db.teacher_login("tee1", "password-1")["teacher_id"]
     for args in (("", "Name", "A"), ("CS 1!", "Name", "A"), ("CS101", "<script>", "A"), ("CS101", "Name", "")):
         with pytest.raises(db.InvalidInput):
             db.create_subject(*args, t)
@@ -94,12 +95,12 @@ def test_subject_creation_validated_server_side(fake_db):
 
 
 def test_teacher_registration_validation():
-    for args, why in ((("ab", "Name", "longenough1", "longenough1"), "3-32"), (("good_user", "Name", "short", "short"), "at least 8"),
-                      (("good_user", "Name", "longenough1", "different11"), "do not match"), (("good user", "Name", "longenough1", "longenough1"), "3-32"),
-                      (("good_user", "", "longenough1", "longenough1"), "required"), (("bad/user", "Name", "longenough1", "longenough1"), "3-32"),
-                      (("good_user", "Name", "x" * 73, "x" * 73), "too long")):
+    for args, why in ((("ab", "Name", "longenough1", "longenough1"), "3-32"), (("good_user1", "Name", "short", "short"), "at least 8"),
+                      (("good_user1", "Name", "longenough1", "different11"), "do not match"), (("good user", "Name", "longenough1", "longenough1"), "3-32"),
+                      (("good_user1", "", "longenough1", "longenough1"), "required"), (("bad/user", "Name", "longenough1", "longenough1"), "3-32"),
+                      (("good_user1", "Name", "x" * 73, "x" * 73), "too long")):
         assert why in db.validate_registration(*args)
-    assert db.validate_registration("good_user", "Name", "longenough1", "longenough1") is None
+    assert db.validate_registration("good_user1", "Name", "longenough1", "longenough1") is None
 
 
 # ------------------------------------------------------------------------ marks CSV abuse
@@ -122,8 +123,8 @@ def test_csv_with_formula_in_name_is_neutralised_on_export():
 
 
 def test_marks_import_rejects_bad_values_at_the_database_layer(fake_db):
-    db.create_teacher("t1", "password-1", "Tee One")
-    t = db.teacher_login("t1", "password-1")["teacher_id"]
+    db.create_teacher("tee1", "password-1", "Tee One")
+    t = db.teacher_login("tee1", "password-1")["teacher_id"]
     sub = db.create_subject("S1", "Subject", "A", t)[0]["subject_id"]
     stu = db.create_student("Ann Lee", fake_face(3))[0]["student_id"]
     db.enroll_student_to_subject(stu, sub)

@@ -2,10 +2,10 @@ import streamlit as st
 
 from src.components.dialog_attendance_results import show_attendance_result
 from src.components.voice_capture import voice_capture
-from src.database.db import DatabaseError, get_enrolled_students
+from src.database.db import DatabaseError, get_enrolled_students, get_voice_gallery
 from src.pipelines.voice_pipeline import VoiceError, process_bulk_audio_detailed
 from src.settings import VOICE_MATCH_THRESHOLD
-from src.services.attendance import build_review_session, new_session_timestamp
+from src.services.attendance import build_review_session, new_session_timestamp, voice_review_inputs
 from src.validation import ValidationError, decode_audio_base64
 
 
@@ -26,7 +26,8 @@ def _analyze_voice_sample(subject_id: int, capture: dict) -> None:
             if not candidates:
                 st.error("None of the enrolled students has a voice profile.")
                 return
-            result = process_bulk_audio_detailed(audio_bytes, candidates)
+            cohort = {int(r["student_id"]): r["voice_embedding"] for r in get_voice_gallery()}
+            result = process_bulk_audio_detailed(audio_bytes, candidates, cohort=cohort)
     except (VoiceError, DatabaseError) as exc:
         st.error(str(exc))
         return
@@ -42,7 +43,7 @@ def _analyze_voice_sample(subject_id: int, capture: dict) -> None:
         st.info(
             f"No voice was confidently identified, so attendance was not created. "
             f"The best profile similarity was {best:.2f}; this app requires {VOICE_MATCH_THRESHOLD:.2f}. "
-            "Have each student replace their voice profile with at least 5 seconds of clear speech, "
+            "Have each student re-record their voice profile (the full prompt, at least 3 seconds of speaking), "
             "then record students one at a time with a pause between speakers. You can also use classroom photos."
         )
         return
@@ -54,23 +55,7 @@ def _analyze_voice_sample(subject_id: int, capture: dict) -> None:
     for issue in (result.quality.issues if result.quality else []):
         st.warning(issue)
 
-    matched_scores = {int(sid): score for sid, score in result.matched.items()}
-    matched_ids = set(matched_scores)
-    present = {sid: f"Voice {score:.2f}" for sid, score in matched_scores.items()}
-    notes = {
-        int(s["student_id"]): "No voice profile: mark manually if present"
-        for s in enrolled if not s.get("voice_embedding")
-    }
-    ambiguous_ids = {int(sid) for group in result.ambiguous for sid in group}
-    for sid in ambiguous_ids:
-        present.setdefault(sid, "Possible voice match; teacher review")
-    for student in enrolled:
-        sid = int(student["student_id"])
-        if sid not in matched_ids and sid not in ambiguous_ids and student.get("voice_embedding"):
-            notes[sid] = "Not identified; verify attendance"
-    for group in result.ambiguous:
-        for sid in group:
-            notes[int(sid)] = "Please verify attendance"
+    present, matched_scores, notes = voice_review_inputs(enrolled, result)
     st.session_state.voice_attendance_results = build_review_session(
         enrolled, present, subject_id, new_session_timestamp(),
         scores=matched_scores, review_notes=notes, method="voice",
@@ -79,7 +64,7 @@ def _analyze_voice_sample(subject_id: int, capture: dict) -> None:
 
 @st.dialog("Voice attendance", width="large")
 def voice_attendance_dialog(subject_id):
-    st.write("Record students one at a time, with a short pause between speakers. Ask each student to read this sentence clearly and naturally for at least 5 seconds: “Present, ma’am. I am here in the class today.” Overlapping voices cannot be identified reliably.")
+    st.write("Record students one at a time, with a short pause between speakers. Ask each student to say this full sentence clearly (about 3 seconds): “Present, ma’am. I am here in the class today.” Leave about a second of silence before the next student. Overlapping voices cannot be identified reliably.")
     capture = voice_capture(key="teacher_voice_attendance_capture", action_label="Analyze audio")
     if isinstance(capture, dict) and capture.get("submitted"):
         request_id = capture.get("request_id")

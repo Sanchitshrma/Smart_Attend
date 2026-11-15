@@ -13,12 +13,12 @@ GOOD_PW = "correct-horse-9"
 
 @pytest.fixture()
 def world(fake_db):
-    admin = db._insert_teacher("boss", GOOD_PW, "Boss Admin", role="admin")["teacher_id"]
-    plain = db.create_teacher("plain", GOOD_PW, "Plain Teacher")[0]["teacher_id"]
+    admin = db._insert_teacher("boss1", GOOD_PW, "Boss Admin", role="admin")["teacher_id"]
+    plain = db.create_teacher("plain1", GOOD_PW, "Plain Teacher")[0]["teacher_id"]
     return fake_db, admin, plain
 
 
-def register(token, username="newbie", **kw):
+def register(token, username="newbie1", **kw):
     return db.register_teacher_with_invite(username, "New Teacher", kw.get("pw", GOOD_PW), kw.get("pw", GOOD_PW), token)
 
 
@@ -28,7 +28,7 @@ def test_only_an_active_admin_can_create_invitations(world):
     for who in (plain, 9999, None, True, "1", -1):
         with pytest.raises(db.PermissionDenied):
             db.create_invitation(who)
-    assert db.create_invitation(admin, "teacher", 3, "x")
+    assert db.create_invitation(admin, "teacher", 3, "Xi")
     db.set_teacher_status(admin, plain, "disabled")
     with pytest.raises(db.PermissionDenied):
         db.create_invitation(plain)
@@ -49,25 +49,23 @@ def test_invitation_is_single_use_and_creates_the_right_role(world):
     t = register(db.create_invitation(admin, "teacher"))
     assert t["role"] == "teacher" and "password" not in t
     token = db.create_invitation(admin, "teacher")
-    register(token, "first")
+    register(token, "first1")
     with pytest.raises(db.PermissionDenied, match="invalid, already used"):
-        register(token, "second")                                              # reuse
-    assert db.teacher_login("second", GOOD_PW) is None
+        register(token, "second1")                                              # reuse
+    assert db.teacher_login("second1", GOOD_PW) is None
     boss2 = register(db.create_invitation(admin, "admin"), "boss2")
     assert boss2["role"] == "admin"
 
 
 def test_expired_revoked_wrong_and_short_tokens_are_rejected(world):
     fake, admin, _ = world
-    expired = db.create_invitation(admin)
-    fake.tables["teacher_invitations"][0]["expires_at"] = "2000-01-01T00:00:00+00:00"
     revoked = db.create_invitation(admin)
     inv = db.list_invitations(admin)
     assert db.revoke_invitation(admin, [i for i in inv if i["status"] == "open"][0]["invite_id"]) is True
-    for bad in (expired, revoked, "x" * 40, "short", "", None):
+    for bad in (revoked, "x" * 40, "short", "", None):
         with pytest.raises(db.PermissionDenied):
-            register(bad, "someone")
-    assert not [t for t in fake.tables["teachers"] if t["username"] == "someone"]
+            register(bad, "someone1")
+    assert not [t for t in fake.tables["teachers"] if t["username"] == "someone1"]
     with pytest.raises(db.PermissionDenied):
         db.revoke_invitation(world[2], 1)
 
@@ -76,11 +74,11 @@ def test_a_username_clash_or_weak_password_does_not_burn_the_invitation(world):
     fake, admin, _ = world
     token = db.create_invitation(admin)
     with pytest.raises(db.DuplicateError):
-        register(token, "PLAIN")                                                # case-insensitive clash
+        register(token, "PLAIN1")                                                # case-insensitive clash
     with pytest.raises(db.InvalidInput):
-        register(token, "ok_name", pw="short")
+        register(token, "ok_name1", pw="short")
     assert fake.tables["teacher_invitations"][0]["used_at"] is None
-    assert register(token, "ok_name")["username"] == "ok_name"
+    assert register(token, "ok_name1")["username"] == "ok_name1"
 
 
 def test_invitation_is_released_if_account_creation_fails(world, monkeypatch):
@@ -88,22 +86,22 @@ def test_invitation_is_released_if_account_creation_fails(world, monkeypatch):
     token = db.create_invitation(admin)
     monkeypatch.setattr(db, "_insert_teacher", lambda *a, **k: (_ for _ in ()).throw(db.DatabaseError("boom")))
     with pytest.raises(db.DatabaseError):
-        register(token, "willfail")
+        register(token, "willfail1")
     assert fake.tables["teacher_invitations"][0]["used_at"] is None             # can be retried
 
 
 def test_invitation_bounds(world):
     _, admin, _ = world
+    # Codes no longer expire (migration 006): `days` is accepted for compatibility and ignored.
     for days in (0, -1, cfg.INVITE_MAX_DAYS + 1):
-        with pytest.raises(db.InvalidInput):
-            db.create_invitation(admin, "teacher", days)
+        assert db.create_invitation(admin, "teacher", days)
     with pytest.raises(db.InvalidInput):
         db.create_invitation(admin, "superuser", 3)
 
 
 # ------------------------------------------------------------------------ first administrator
 def test_first_admin_setup_is_guarded_and_works_once(fake_db, monkeypatch):
-    args = ("root", "Root Admin", GOOD_PW, GOOD_PW)
+    args = ("root1", "Root Admin", GOOD_PW, GOOD_PW)
     monkeypatch.setattr(cfg, "ADMIN_SETUP_TOKEN", None)
     assert db.admin_setup_available() is False
     with pytest.raises(db.PermissionDenied, match="not enabled"):
@@ -125,7 +123,7 @@ def test_setup_claim_is_released_if_creation_fails(fake_db, monkeypatch):
     monkeypatch.setattr(cfg, "ADMIN_SETUP_TOKEN", "setup-secret-123")
     monkeypatch.setattr(db, "_insert_teacher", lambda *a, **k: (_ for _ in ()).throw(db.DatabaseError("boom")))
     with pytest.raises(db.DatabaseError):
-        db.bootstrap_admin("root", "Root Admin", GOOD_PW, GOOD_PW, "setup-secret-123")
+        db.bootstrap_admin("root1", "Root Admin", GOOD_PW, GOOD_PW, "setup-secret-123")
     assert fake_db.tables["app_settings"] == []                                 # retry possible
 
 
@@ -133,7 +131,7 @@ def test_setup_claim_blocks_a_concurrent_second_setup(fake_db, monkeypatch):
     monkeypatch.setattr(cfg, "ADMIN_SETUP_TOKEN", "setup-secret-123")
     fake_db.table("app_settings").insert({"key": "admin_bootstrap", "value": "x"}).execute()   # the other request won
     with pytest.raises(db.PermissionDenied, match="already complete"):
-        db.bootstrap_admin("root", "Root Admin", GOOD_PW, GOOD_PW, "setup-secret-123")
+        db.bootstrap_admin("root1", "Root Admin", GOOD_PW, GOOD_PW, "setup-secret-123")
 
 
 # ------------------------------------------------------------------------- admin management
@@ -160,13 +158,13 @@ def test_admin_cannot_lock_everyone_out_and_non_admins_cannot_manage(world):
 def test_login_lockout_applies_even_to_the_right_password_then_expires(world):
     fake, _, _ = world
     for _ in range(cfg.LOGIN_MAX_FAILURES):
-        assert db.teacher_login("plain", "wrong-password-1") is None
+        assert db.teacher_login("plain1", "wrong-password-1") is None
     with pytest.raises(db.RateLimited):
-        db.teacher_login("plain", GOOD_PW)                                      # locked, even with the correct password
-    assert db.teacher_login("boss", GOOD_PW)["role"] == "admin"                 # other accounts unaffected
+        db.teacher_login("plain1", GOOD_PW)                                      # locked, even with the correct password
+    assert db.teacher_login("boss1", GOOD_PW)["role"] == "admin"                 # other accounts unaffected
     for r in fake.tables["auth_attempts"]:
         r["attempted_at"] = "2000-01-01T00:00:00+00:00"                         # window passes
-    assert db.teacher_login("plain", GOOD_PW)["username"] == "plain"
+    assert db.teacher_login("plain1", GOOD_PW)["username"] == "plain1"
 
 
 def test_unknown_usernames_are_throttled_too_and_look_identical(world):
@@ -178,11 +176,11 @@ def test_unknown_usernames_are_throttled_too_and_look_identical(world):
 
 def test_success_resets_failures(world):
     for _ in range(cfg.LOGIN_MAX_FAILURES - 1):
-        db.teacher_login("plain", "wrong-password-1")
-    assert db.teacher_login("plain", GOOD_PW)
+        db.teacher_login("plain1", "wrong-password-1")
+    assert db.teacher_login("plain1", GOOD_PW)
     for _ in range(cfg.LOGIN_MAX_FAILURES - 1):
-        db.teacher_login("plain", "wrong-password-1")
-    assert db.teacher_login("plain", GOOD_PW)                                   # not locked: earlier failures were cleared
+        db.teacher_login("plain1", "wrong-password-1")
+    assert db.teacher_login("plain1", GOOD_PW)                                   # not locked: earlier failures were cleared
 
 
 def test_invitation_guessing_is_rate_limited(world):
@@ -213,7 +211,7 @@ def test_disabled_teacher_cannot_log_in_or_use_existing_ids(world):
     fake, admin, plain = world
     sub = db.create_subject("S1", "Subject", "A", plain)[0]["subject_id"]
     db.set_teacher_status(admin, plain, "disabled")
-    assert db.teacher_login("plain", GOOD_PW) is None
+    assert db.teacher_login("plain1", GOOD_PW) is None
     ops = [lambda: db.get_teacher_subjects(plain), lambda: db.create_subject("S2", "Other", "A", plain),
            lambda: db.get_enrolled_students(plain, sub), lambda: db.list_assessments(plain, sub),
            lambda: db.get_attendance_for_teacher(plain), lambda: db.create_assessment(plain, sub, "Mid", 10)]

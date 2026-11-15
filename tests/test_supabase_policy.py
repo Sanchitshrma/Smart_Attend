@@ -38,8 +38,8 @@ def test_app_refuses_to_start_with_a_public_key():
 # ---------------------------------------------------------------- authorisation matrix
 @pytest.fixture()
 def world(fake_db):
-    db.create_teacher("owner", "password-1", "Owner Teacher"); db.create_teacher("other", "password-2", "Other Teacher")
-    o, x = (db.teacher_login(u, p)["teacher_id"] for u, p in (("owner", "password-1"), ("other", "password-2")))
+    db.create_teacher("owner1", "password-1", "Owner Teacher"); db.create_teacher("other1", "password-2", "Other Teacher")
+    o, x = (db.teacher_login(u, p)["teacher_id"] for u, p in (("owner1", "password-1"), ("other1", "password-2")))
     sub = db.create_subject("S1", "Subject", "A", o)[0]["subject_id"]
     stu = [db.create_student(n, fake_face(i))[0]["student_id"] for i, n in enumerate(["Al Roy", "Bo Lee"])]
     for s in stu:
@@ -106,7 +106,7 @@ def test_unpublished_marks_stay_invisible_and_other_students_data_is_not_returne
 
 def test_nothing_returned_to_the_ui_layer_contains_secrets_or_biometrics(world):
     blob = " ".join(str(x) for x in (
-        db.teacher_login("owner", "password-1"), db.get_teacher_subjects(world["o"]), db.get_student(world["stu"][0]),
+        db.teacher_login("owner1", "password-1"), db.get_teacher_subjects(world["o"]), db.get_student(world["stu"][0]),
         db.get_attendance_for_teacher(world["o"]), db.get_marks(world["o"], world["a"]), db.get_student_marks(world["stu"][0]),
         db.get_student_subjects(world["stu"][0]), db.get_student_attendance(world["stu"][0]), db.get_session_logs(world["o"], world["sub"], world["ts"])))
     for forbidden in ("face_embedding", "voice_embedding", "$2b$", "password", "token_hash"):
@@ -145,6 +145,9 @@ def test_lockdown_migration_revokes_public_access():
 def test_migrations_are_additive_and_safe_to_rerun():
     for f in sorted((ROOT / "supabase" / "migrations").glob("*.sql")):
         body = re.sub(r"--.*", "", f.read_text())
+        # Statements inside function bodies ($$ ... $$) run only when the function is called
+        # (e.g. a student deleting their own profile), never when the migration is applied.
+        body = re.sub(r"\$\$.*?\$\$", "", body, flags=re.S)
         assert not re.search(r"\b(drop\s+table|drop\s+column|truncate|delete\s+from)\b", body, re.I), f.name
         for stmt in re.findall(r"create\s+table\s+(?!if not exists)", body, re.I):
             pytest.fail(f"{f.name}: create table without IF NOT EXISTS")

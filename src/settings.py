@@ -48,7 +48,9 @@ def _int_setting(name: str, default: str, minimum: int, maximum: int) -> int:
 
 # Tunable recognition thresholds (documented in README).
 FACE_MATCH_THRESHOLD = _float_setting("FACE_MATCH_THRESHOLD", "0.45", 0.0, 1.0)
-VOICE_MATCH_THRESHOLD = _float_setting("VOICE_MATCH_THRESHOLD", "0.55", 0.0, 1.0)
+# Voice: minimum raw cosine similarity for a speaker match. Raised from 0.55 because two DIFFERENT
+# Resemblyzer voices typically score ~0.58 (see scripts/evaluate_voice.py).
+VOICE_MATCH_THRESHOLD = _float_setting("VOICE_MATCH_THRESHOLD", "0.70", 0.0, 1.0)
 # Ambiguity margin: if the 2nd-best candidate is also within the threshold and closer than
 # this to the best, the face is sent to teacher review instead of auto-assigned.
 # PROVISIONAL default: not yet tuned on real labelled data (see evaluation/README).
@@ -60,6 +62,13 @@ FACE_MIN_SIZE_PX = _int_setting("FACE_MIN_SIZE_PX", "40", 1, 2000)
 # Voice: 2nd-best speaker within this similarity of the best (and above threshold) => teacher review.
 # PROVISIONAL, not tuned on labelled recordings.
 VOICE_MATCH_MARGIN = _float_setting("VOICE_MATCH_MARGIN", "0.05", 0.0, 2.0)
+# Voice score normalisation (used when at least VOICE_MIN_COHORT voice profiles exist):
+# each speaking turn is compared with every stored voice profile, and a match must stand out
+# from that crowd by VOICE_MIN_ZSCORE standard deviations and beat the runner-up by VOICE_Z_MARGIN.
+# Tuned on synthetic recordings (scripts/evaluate_voice.py); re-tune on real classroom audio.
+VOICE_MIN_ZSCORE = _float_setting("VOICE_MIN_ZSCORE", "2.5", 0.0, 10.0)
+VOICE_Z_MARGIN = _float_setting("VOICE_Z_MARGIN", "0.75", 0.0, 5.0)
+VOICE_MIN_COHORT = _int_setting("VOICE_MIN_COHORT", "8", 4, 100000)
 
 # ---- account security
 # One-time secret that lets the FIRST administrator be created. Remove it from your secrets after setup.

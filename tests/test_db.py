@@ -5,32 +5,32 @@ from src.database import db
 
 
 def _teacher(fake_db):
-    db.create_teacher("Ananya", "correct-horse", "Ananya Roy")
-    return db.teacher_login("ananya", "correct-horse")
+    db.create_teacher("Ananya7", "correct-horse", "Ananya Roy")
+    return db.teacher_login("ananya7", "correct-horse")
 
 
 def test_teacher_register_login_and_no_hash_leak(fake_db):
     t = _teacher(fake_db)
     assert t["name"] == "Ananya Roy" and "password" not in t
-    assert db.teacher_login("ananya", "wrong-password") is None
+    assert db.teacher_login("ananya7", "wrong-password") is None
     assert db.teacher_login("nobody", "x") is None
     assert fake_db.tables["teachers"][0]["password"].startswith("$2")  # bcrypt, not plaintext
-    assert db.check_teacher_exists(" ANANYA ")
+    assert db.check_teacher_exists(" ANANYA7 ")
 
 
 def test_duplicate_username_rejected(fake_db):
     _teacher(fake_db)
     with pytest.raises(db.DuplicateError):
-        db.create_teacher("ananya", "another-pass1", "Imposter")
+        db.create_teacher("ananya7", "another-pass1", "Imposter")
 
 
 @pytest.mark.parametrize("u,n,p,c,ok", [
-    ("ab", "N", "longenough", "longenough", False),
-    ("good_user", "N", "short", "short", False),
-    ("good_user", "N", "longenough", "different1", False),
-    ("good_user", " ", "longenough", "longenough", False),
-    ("good_user", "N", "x" * 80, "x" * 80, False),
-    ("good_user", "N", "longenough", "longenough", True),
+    ("ab", "Nina", "longenough", "longenough", False),
+    ("good_user1", "Nina", "short", "short", False),
+    ("good_user1", "Nina", "longenough", "different1", False),
+    ("good_user1", " ", "longenough", "longenough", False),
+    ("good_user1", "Nina", "x" * 80, "x" * 80, False),
+    ("good_user1", "Nina", "longenough", "longenough", True),
 ])
 def test_validate_registration(u, n, p, c, ok):
     assert (db.validate_registration(u, n, p, c) is None) == ok
@@ -80,8 +80,8 @@ def test_attendance_save_is_idempotent_and_counts_sessions(fake_db):
 
 def test_teacher_cannot_see_other_teachers_records(fake_db):
     t1 = _teacher(fake_db)
-    db.create_teacher("second", "password-two", "Second")
-    t2 = db.teacher_login("second", "password-two")
+    db.create_teacher("second1", "password-two", "Second")
+    t2 = db.teacher_login("second1", "password-two")
     s1 = db.create_subject("A1", "One", "A", t1["teacher_id"])[0]
     stu = db.create_student("Sy", fake_face(100))[0]["student_id"]
     db.enroll_student_to_subject(stu, s1["subject_id"])

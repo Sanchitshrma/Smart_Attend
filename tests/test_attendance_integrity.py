@@ -10,8 +10,8 @@ TS = "2026-02-01T09:00:00+00:00"
 
 @pytest.fixture()
 def world(fake_db):
-    db.create_teacher("t1", "password-1", "T1"); db.create_teacher("t2", "password-2", "T2")
-    t1, t2 = db.teacher_login("t1", "password-1"), db.teacher_login("t2", "password-2")
+    db.create_teacher("tee1", "password-1", "Tee One"); db.create_teacher("tee2", "password-2", "Tee Two")
+    t1, t2 = db.teacher_login("tee1", "password-1"), db.teacher_login("tee2", "password-2")
     sub = db.create_subject("S1", "Sub", "A", t1["teacher_id"])[0]["subject_id"]
     stu = [db.create_student(n, fake_face(i))[0]["student_id"] for i, n in enumerate(["Al", "Bo", "Cy"])]
     for s in stu[:2]:

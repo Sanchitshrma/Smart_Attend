@@ -61,11 +61,11 @@ def test_portal_links_route_to_screens(fake_db):
 
 
 def _admin(fake_db):
-    db._insert_teacher("boss", "boss-password-1", "Boss Admin", role="admin")
-    return db.teacher_login("boss", "boss-password-1")
+    db._insert_teacher("boss1", "boss-password-1", "Boss Admin", role="admin")
+    return db.teacher_login("boss1", "boss-password-1")
 
 
-def _fill_register(at, token, username="ananya", password="longenough1", confirm="longenough1"):
+def _fill_register(at, token, username="ananya7", password="longenough1", confirm="longenough1"):
     f = at.text_input
     f[0].set_value(token); f[1].set_value(username); f[2].set_value("Ananya Roy"); f[3].set_value(password); f[4].set_value(confirm)
     [b for b in at.button if b.label == "Create account"][0].click().run()
@@ -76,8 +76,8 @@ def test_teacher_registration_requires_a_valid_invitation_then_login_works(fake_
     token = db.create_invitation(admin["teacher_id"], "teacher", 3, "Ananya")
     at = run(login_type="teacher", teacher_login_type="register")
     _fill_register(at, "not-a-real-token-at-all-0000")                      # public visitor with a guessed code
-    assert any("invalid, already used, or has expired" in e.value for e in at.error)
-    assert [t["username"] for t in fake_db.tables["teachers"]] == ["boss"]  # nothing created
+    assert any("invalid, already used, or revoked" in e.value for e in at.error)
+    assert [t["username"] for t in fake_db.tables["teachers"]] == ["boss1"]  # nothing created
     _fill_register(at, token, password="short", confirm="short")             # valid token, weak password
     assert any("at least 8" in e.value for e in at.error)
     assert fake_db.tables["teacher_invitations"][0]["used_at"] is None       # a validation failure does not burn the invite
@@ -86,10 +86,10 @@ def test_teacher_registration_requires_a_valid_invitation_then_login_works(fake_
     assert fake_db.tables["teacher_invitations"][0]["used_at"] is not None
     # the same code cannot be reused
     at2 = run(login_type="teacher", teacher_login_type="register")
-    _fill_register(at2, token, username="someoneelse")
-    assert any("invalid, already used, or has expired" in e.value for e in at2.error) and len(fake_db.tables["teachers"]) == 2
+    _fill_register(at2, token, username="someoneelse1")
+    assert any("invalid, already used, or revoked" in e.value for e in at2.error) and len(fake_db.tables["teachers"]) == 2
     # login: wrong then right
-    at.text_input[0].set_value("ananya"); at.text_input[1].set_value("wrong-pass-1")
+    at.text_input[0].set_value("ananya7"); at.text_input[1].set_value("wrong-pass-1")
     [b for b in at.button if b.label == "Log in"][0].click().run()
     assert any("Invalid username or password" in e.value for e in at.error)
     at.text_input[1].set_value("longenough1")
@@ -101,8 +101,8 @@ def test_teacher_registration_requires_a_valid_invitation_then_login_works(fake_
 
 
 def _seed(fake_db):
-    db.create_teacher("t1", "password-1", "Tess Teacher")
-    t = db.teacher_login("t1", "password-1")
+    db.create_teacher("tee1", "password-1", "Tess Teacher")
+    t = db.teacher_login("tee1", "password-1")
     s1 = db.create_subject("M1", "Mathematics", "A", t["teacher_id"])[0]
     s2 = db.create_subject("P1", "Physics", "B", t["teacher_id"])[0]
     stu = [db.create_student(n, fake_face(i))[0]["student_id"] for i, n in enumerate(["Al", "Bo", "Cy"])]
@@ -136,8 +136,8 @@ def test_teacher_dashboard_shows_real_numbers_in_every_tab(fake_db):
 
 
 def test_subject_html_is_escaped_even_for_legacy_rows(fake_db):
-    db.create_teacher("t2", "password-2", "Tee Two")
-    t = db.teacher_login("t2", "password-2")
+    db.create_teacher("tee2", "password-2", "Tee Two")
+    t = db.teacher_login("tee2", "password-2")
     with pytest.raises(db.InvalidInput):                                  # new data: rejected at the server
         db.create_subject("X1", "<img src=x onerror=alert(1)>", "A", t["teacher_id"])
     fake_db.tables["subjects"].append({"subject_id": 99, "subject_code": "X1", "name": "<img src=x onerror=alert(1)>", "section": "A", "teacher_id": t["teacher_id"]})

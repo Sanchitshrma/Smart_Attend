@@ -2,7 +2,7 @@
 
     streamlit run tests/dev_fake_backend.py
 
-Demo ADMIN login: username `demo`, password `demo-password`.
+Demo ADMIN login: username `demo1`, password `demo-password`.
 Never use in production; data is lost when the process stops.
 """
 import runpy
@@ -18,15 +18,19 @@ from tests.helpers import fake_face  # noqa: E402
 
 if getattr(config, "_client_override", None) is None:
     config.set_client_for_testing(FakeSupabase())
-    db._insert_teacher("demo", "demo-password", "Demo Teacher", role="admin")  # admin so the Admin tab can be explored
-    t = db.teacher_login("demo", "demo-password")["teacher_id"]
+    db._insert_teacher("demo1", "demo-password", "Demo Teacher", role="admin")  # admin so the Admin tab can be explored
+    t = db.teacher_login("demo1", "demo-password")["teacher_id"]
     math = db.create_subject("MATH101", "Mathematics", "A", t)[0]["subject_id"]
     phys = db.create_subject("PHY201", "Physics", "B", t)[0]["subject_id"]
     ids = [db.create_student(n, fake_face(i))[0]["student_id"] for i, n in enumerate(["Aisha Khan", "Ben Ortiz", "Chen Wei", "Dana Lee"])]
+    # Seed enrolments directly: enroll_student_to_subject() now requires that student's own
+    # signed-in session, which does not exist while this script seeds data inside Streamlit.
+    def enrol(student_id, subject_id):
+        db._run(db._t("subject_students").insert({"student_id": student_id, "subject_id": subject_id}), "seed enrolment")
     for s in ids:
-        db.enroll_student_to_subject(s, math)
+        enrol(s, math)
     for s in ids[:2]:
-        db.enroll_student_to_subject(s, phys)
+        enrol(s, phys)
     for day, absent in (("2026-09-01", {1}), ("2026-09-08", {2, 3}), ("2026-09-15", set())):
         db.save_attendance_session([
             {"student_id": s, "subject_id": math, "timestamp": f"{day}T09:00:00+00:00", "is_present": i not in absent}

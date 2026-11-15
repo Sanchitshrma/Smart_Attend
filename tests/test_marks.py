@@ -72,8 +72,8 @@ def test_validate_mark_edge_cases():
 # ----------------------------------------------------------------------------- DB layer
 @pytest.fixture()
 def world(fake_db):
-    db.create_teacher("t1", "password-1", "T1"); db.create_teacher("t2", "password-2", "T2")
-    t1 = db.teacher_login("t1", "password-1")["teacher_id"]; t2 = db.teacher_login("t2", "password-2")["teacher_id"]
+    db.create_teacher("tee1", "password-1", "Tee One"); db.create_teacher("tee2", "password-2", "Tee Two")
+    t1 = db.teacher_login("tee1", "password-1")["teacher_id"]; t2 = db.teacher_login("tee2", "password-2")["teacher_id"]
     sub = db.create_subject("S1", "Sub", "A", t1)[0]["subject_id"]
     stu = [db.create_student(n, fake_face(i))[0]["student_id"] for i, n in enumerate(["Al", "Bo", "Cy"])]
     for s in stu[:2]:

@@ -209,6 +209,31 @@ def merge_photo_results(results, ids_in_class: set[int]) -> tuple[dict[int, str]
     return present, scores, {k: "; ".join(v) for k, v in notes.items()}, totals
 
 
+def voice_review_inputs(enrolled: Iterable[Mapping], result) -> tuple[dict[int, str], dict[int, float], dict[int, str]]:
+    """Turn a BulkVoiceResult into (present, scores, review_notes) for build_review_session.
+
+    Only confident matches are ticked present. Ambiguous candidates get a review note but stay
+    unticked (the same rule as faces), so pressing "Confirm & save" without reading the table can
+    never mark a student present on a guess.
+    """
+    scores = {int(sid): float(score) for sid, score in result.matched.items()}
+    present = {sid: f"Voice {score:.2f}" for sid, score in scores.items()}
+    matched = set(scores)
+    ambiguous = {int(sid) for group in result.ambiguous for sid in group} - matched
+    other_class = {int(sid) for sid in getattr(result, "other_class", [])}
+    notes: dict[int, str] = {}
+    for student in enrolled:
+        sid = int(student["student_id"])
+        if not student.get("voice_embedding"):
+            notes[sid] = "No voice profile: mark manually if present"
+        elif sid in ambiguous:
+            notes[sid] = ("Possible match, but a student from another class sounds as close; verify"
+                          if sid in other_class else "Possible voice match; please verify")
+        elif sid not in matched:
+            notes[sid] = "Not identified; verify attendance"
+    return present, scores, notes
+
+
 # ------------------------------------------------------------------ analytics
 DEFAULT_MIN_ATTENDANCE = 75.0
 

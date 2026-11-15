@@ -428,6 +428,13 @@ def get_face_gallery() -> list[dict]:
     return [r for r in rows if r.get("face_embedding")]
 
 
+def get_voice_gallery() -> list[dict]:
+    """Voice profiles of all students (id + embedding only), used to normalise voice scores and to
+    notice when a student from another class sounds closer than anyone enrolled."""
+    rows = _run(_t("students").select("student_id, voice_embedding"), "load voice profiles")
+    return [r for r in rows if r.get("voice_embedding")]
+
+
 _GALLERY_HAS_TS: bool | None = None
 
 
