@@ -52,8 +52,14 @@
       window.parent.postMessage({isStreamlitMessage: true, type, ...value}, "*");
     }
     function setHeight() {
-      post("streamlit:setFrameHeight", {height: document.body.scrollHeight});
-    }
+  const height = Math.max(
+    300,
+    document.documentElement.scrollHeight,
+    document.body.scrollHeight
+  );
+
+  post("streamlit:setFrameHeight", {height: height});
+}
     function updateRecordingTime() {
       const seconds = Math.floor((Date.now() - recordingStartedAt) / 1000);
       const minutesText = String(Math.floor(seconds / 60)).padStart(2, "0");
